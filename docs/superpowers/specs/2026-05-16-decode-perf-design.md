@@ -146,11 +146,24 @@ if the stripe width justifies it; SVE2 falls back to NEON if not productive.
 Merge the dequantization multiply/shift into the final pass's write so
 coefficients are emitted in their final form, avoiding a separate sweep.
 
-**D6 — T1 working-state struct.**
-Consolidate all per-codeblock T1 state into a single `opj_t1_dec_t` struct:
-no file-static globals, no allocations during decode (pre-size from codeblock
-dims at tile setup). This is the seam Sub-project 2 will use to thread
-codeblocks.
+**D6 — T1 working-state cleanup.**
+*(Narrowed after code inspection on 2026-05-16: upstream already consolidates
+state in `opj_t1_t`, already has per-thread TLS instances, and already
+amortizes `data`/`flags` allocations across codeblocks. D6 is the residual
+cleanup that remains worthwhile.)*
+
+- **D6.1** Split `opj_t1_t` into `opj_t1_dec_t` and `opj_t1_enc_t`. Remove
+  the `encoder` boolean and dual-purpose fields. Decoder hot path uses a
+  smaller, decoder-only struct (better cache footprint, fewer branches).
+- **D6.2** Pre-size `data` and `flags` at tile setup using the tile's max
+  codeblock dimensions, eliminating the cold-codeblock realloc path.
+- **D6.3** Pool per-codeblock `opj_t1_cblk_decode_processing_job_t`
+  allocations.
+- **D6.4** Route `cblk->decoded_data` in non-whole-tile mode through a
+  reusable per-thread buffer (same TLS pattern as the t1 instance).
+- **D6.5** Land `t1_fast.c` / `t1_fast.h` scaffolding under Apache-2.0 and
+  wire the `OPJ_T1_LEGACY_ONLY` build switch (per §3.3) so the diff-test
+  infrastructure exists when D1 arrives.
 
 ### 2.3 Ordering
 
