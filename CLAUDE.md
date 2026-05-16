@@ -3,10 +3,17 @@
 ## What this is
 
 Performance-oriented fork of [uclouvain/openjpeg](https://github.com/uclouvain/openjpeg).
-Goal: faster JPEG 2000 decode on whole-slide-imaging workloads — typically
-large `.jp2` tiles (often 256×256 to 4096×4096), decoded one tile at a
-time, frequently as a partial region rather than the whole image. Encode
-performance is not a priority.
+Goal: **permissively-licensed, Kakadu-class JPEG 2000 decode** for the
+production domains that depend on JP2K — radiology / DICOM (8/12/16-bit
+monochrome and color), geospatial (GeoJP2 / NITF), general photographic
+imaging, and whole-slide pathology. Optimizations are measured against a
+cross-domain corpus; no single domain's quirks drive decisions in isolation.
+Encode performance is not a priority.
+
+Whole-slide imaging prompted the fork (see openscope, below) and remains a
+first-class workload, but the value proposition — Apache-licensed decode that
+closes the gap with Kakadu and beats Grok where the AGPL forbids use — is
+domain-agnostic.
 
 ## Licensing — read this before editing files
 
@@ -45,9 +52,12 @@ The decode hot paths in order of typical wall-time contribution:
 - **Tile-component buffer management** (`src/lib/openjp2/tcd.c`). Less
   CPU-bound but allocation patterns affect throughput.
 
-WSI workloads are unusual in that they often decode one component
-(or a partial region) at a time; opportunities exist to short-circuit
-work that vanilla openjpeg doesn't bother optimizing for that pattern.
+Partial-region / ROI decode is a cross-cutting opportunity: geospatial
+viewers panning over GeoJP2, DICOM viewers zooming into a radiograph, and
+WSI viewers tiling a slide all decode subregions. Vanilla openjpeg does not
+short-circuit work outside the requested region; we should. Likewise,
+single-component decode (common in DICOM monochrome and in WSI tile
+pipelines) has optimization headroom vanilla doesn't bother with.
 
 ## Upstream tracking
 
@@ -62,10 +72,11 @@ Expect conflicts on files we've modified for performance.
 ## Sibling repos
 
 - **[cornish/openjp2k-bench](https://github.com/cornish/openjp2k-bench)** —
-  benchmark harness for evaluating changes. Build with
-  `--openjpeg-source <path-to-this-fork>` to test our changes against
-  vanilla openjpeg and Grok.
-- **[cornish/openscope](https://github.com/cornish/openscope)** — the
-  WSI viewer that ultimately consumes this fork. Drives the workload
-  shape (single-tile decode, often partial region) that we're
-  optimizing for.
+  benchmark harness for evaluating changes against vanilla openjpeg, Grok,
+  and published Kakadu numbers. Cross-domain corpus (radiology, geospatial,
+  photographic, WSI). Build with `--openjpeg-source <path-to-this-fork>` to
+  measure our changes.
+- **[cornish/openscope](https://github.com/cornish/openscope)** — a WSI
+  viewer that consumes this fork. One of several real-world consumers; it
+  surfaces the WSI workload shape (single-tile decode, often partial region)
+  but does not get to dictate decode-side tradeoffs against other domains.
