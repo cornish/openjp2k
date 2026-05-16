@@ -1,0 +1,35 @@
+openjp2k
+Copyright 2026 Toby Cornish and openjp2k contributors
+
+Licensed under the Apache License, Version 2.0 (the "License").
+See LICENSE for the full Apache 2.0 text.
+
+----------------------------------------------------------------------
+
+This product is a fork of OpenJPEG
+(https://github.com/uclouvain/openjpeg).
+
+The original OpenJPEG source files are distributed under the
+2-clause BSD License. Those files retain their original copyright
+notices and license headers. The full text of the BSD-2-Clause
+license as it applies to the inherited code is preserved at:
+
+    LICENSE.openjpeg-BSD-2
+
+Original OpenJPEG copyright holders include (non-exhaustive):
+
+    Copyright (c) 2002-2014, Universite catholique de Louvain (UCL), Belgium
+    Copyright (c) 2002-2014, Professor Benoit Macq
+    Copyright (c) 2003-2014, Antonin Descampe
+    Copyright (c) 2003-2009, Francois-Olivier Devaux
+    Copyright (c) 2005, Herve Drolon, FreeImage Team
+    Copyright (c) 2002-2003, Yannick Verschueren
+    Copyright (c) 2001-2003, David Janssens
+    Copyright (c) 2011-2012, Centre National d'Etudes Spatiales (CNES), France
+    Copyright (c) 2012, CS Systemes d'Information, France
+
+Modifications and new files added in this fork (beyond what is
+inherited from upstream OpenJPEG) are licensed under Apache-2.0.
+New files should carry an SPDX-License-Identifier: Apache-2.0 header.
+Modifications to inherited BSD-2 files leave the existing BSD-2
+header in place; the file remains BSD-2 with combined copyright.
