@@ -2,7 +2,13 @@
 
 **Date:** 2026-05-16
 **Status:** Design / pre-implementation
-**Scope:** Decode-path performance for the openjp2k fork. WSI workloads (single-tile decode, often partial region).
+**Scope:** Decode-path performance for the openjp2k fork. Target framing is
+**general-purpose JPEG 2000 decode** — permissively-licensed, Kakadu-class
+throughput across the production domains: radiology / DICOM (8/12/16-bit
+monochrome and color), geospatial (GeoJP2 / NITF), general photographic
+imaging, and whole-slide imaging. WSI prompted this fork and remains a
+first-class workload, but optimizations are evaluated against the full
+cross-domain corpus, not WSI alone.
 
 ---
 
@@ -16,9 +22,11 @@ document; the others are scoped here only enough to justify the ordering.
 
 Runs in the sister repo `openjp2k-bench`. Produces:
 
-- A versioned, reproducible WSI-shaped corpus: 256² / 512² / 1024² / 2048² /
-  4096² tiles, 8-bit and 16-bit, 1- and 3-component, lossless 5-3 and lossy
-  9-7, plus partial-region decode requests.
+- A versioned, reproducible **cross-domain corpus**: photographic, DICOM
+  medical (8/12/16-bit, monochrome and color), geospatial (GeoJP2 / NITF
+  including large single-image streams), and WSI tiles (256² to 4096²);
+  lossless 5-3 and lossy 9-7; partial-region / ROI decode requests across
+  all four domains.
 - Methodology doc: pinned compiler flags, warm-up policy, cycles + wallclock,
   per-stage breakdown.
 - Vanilla openjpeg + Grok baselines captured. Kakadu published numbers pasted
@@ -54,15 +62,19 @@ cleanly measurable per codeblock.
 
 Decode independent codeblocks in parallel. Touches `tcd.c` orchestration and
 the t1 entry. Multiplies Sub-project 1's per-codeblock wins by core count.
-Largest practical wallclock win for WSI tiles, which contain many codeblocks
-per component per resolution.
+Largest practical wallclock win for any image with many codeblocks per
+component per resolution — which covers essentially every production workload
+(WSI tiles, geospatial scenes, large radiology series, multi-megapixel
+photographic images).
 
 ### Sub-project 3 — Inverse DWT polish
 
 Upstream's recent NEON IDWT work is a starting point. Add AVX2/AVX-512 paths
 for the 9-7 and 5-3 IDWTs. Add partial-region short-circuiting: skip DWT
-samples outside the requested region — a WSI-specific win vanilla openjpeg
-doesn't bother with.
+samples outside the requested region. Region-of-interest decode matters
+broadly — geospatial viewers (panning over a tiled GeoJP2), DICOM viewers
+(zooming into a region of a radiograph), and WSI viewers all decode partial
+regions, but vanilla openjpeg does not optimize for it.
 
 ### Sub-project 4 — MCT vectorization
 
@@ -72,13 +84,16 @@ Small file but disproportionately easy to win.
 ### Sub-project 5 — TCD buffer + allocation churn
 
 Reuse tile-component buffers across tiles in a session; eliminate per-tile
-mallocs. Less CPU-bound but matters for the repeated-tile workload openscope
-drives.
+mallocs. Less CPU-bound but matters for any session-style consumer:
+interactive viewers (WSI, geospatial, DICOM) that decode many tiles in
+sequence, and batch pipelines that process many images per process.
 
 ### Out of scope
 
-- **HTJ2K (Part 15) entropy coding.** Most WSI files in production are Part-1
-  streams. Revisit if/when openscope encounters HT-coded WSIs at volume.
+- **HTJ2K (Part 15) entropy coding.** The overwhelming majority of production
+  streams across all four target domains are Part-1. HT adoption is ramping
+  fastest in WSI but is still a minority. Revisit when the bench corpus shows
+  meaningful HT volume in any domain.
 
 ### Cross-cutting constraints
 
@@ -214,8 +229,8 @@ This same discipline propagates to every later sub-project.
   codeblock-style combinations that actually appear in WSI files.
 - **Stripe SIMD on partial-region decodes (D4).** Partial-region decode can
   produce stripes narrower than the SIMD vector. *Mitigation:* scalar tail
-  handler; benchmarked separately because partial-region is a primary
-  openscope workload.
+  handler; benchmarked separately because ROI / partial-region decode is a
+  cross-domain concern (geospatial, DICOM, WSI viewers all hit this path).
 - **Clean-room contamination.** The Sub-project 0.5 Grok report must be
   audited before D1–D5 work begins, and the report-reader instance must not
   be the same instance that implements.
@@ -229,9 +244,11 @@ pins what *this* fork commits to so the gate in §2.7 is reproducible.
 
 ### 3.1 Corpus assumptions
 
-The bench provides a versioned corpus (see Sub-project 0). Corpus version is
+The bench provides a versioned cross-domain corpus (see Sub-project 0)
+spanning photographic, DICOM, geospatial, and WSI streams. Corpus version is
 recorded with every perf-log entry. Numbers are never compared across corpus
-versions.
+versions. Per-deliverable results must be reported broken down by domain so
+domain-specific regressions cannot hide behind aggregate wins.
 
 ### 3.2 Build flags
 
