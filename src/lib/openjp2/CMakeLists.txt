@@ -78,6 +78,11 @@ if(OPJ_DISABLE_TPSOT_FIX)
   add_definitions(-DOPJ_DISABLE_TPSOT_FIX)
 endif()
 
+option(OPJ_T1_LEGACY_ONLY "Force the legacy T1 decoder path (disable t1_fast variants). Used by CI diff-tests and as a correctness fallback." OFF)
+if(OPJ_T1_LEGACY_ONLY)
+  add_definitions(-DOPJ_T1_LEGACY_ONLY)
+endif()
+
 # Special case for old i586-mingw32msvc-gcc cross compiler
 if(NOT WIN32 AND CMAKE_COMPILER_IS_GNUCC AND CMAKE_C_COMPILER MATCHES ".*mingw32msvc.*" )
   set(WIN32 YES)
