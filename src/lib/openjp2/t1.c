@@ -1551,12 +1551,12 @@ opj_t1_t* opj_t1_create(OPJ_BOOL isEncoder)
 {
     opj_t1_t *l_t1 = 00;
 
+    (void)isEncoder;
+
     l_t1 = (opj_t1_t*) opj_calloc(1, sizeof(opj_t1_t));
     if (!l_t1) {
         return 00;
     }
-
-    l_t1->encoder = isEncoder;
 
     return l_t1;
 }

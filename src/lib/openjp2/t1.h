@@ -198,7 +198,6 @@ typedef struct opj_t1 {
     OPJ_UINT32 h;
     OPJ_UINT32 datasize;
     OPJ_UINT32 flagssize;
-    OPJ_BOOL   encoder;
 
     /* The 3 variables below are only used by the decoder */
     /* set to TRUE in multithreaded context */
