@@ -1492,6 +1492,7 @@ static OPJ_BOOL opj_t1_allocate_buffers(
         OPJ_UINT32 flags_height = (h + 3U) / 4U;
 
         if (flagssize > t1->flagssize) {
+
             opj_aligned_free(t1->flags);
             t1->flags = (opj_flag_t*) opj_aligned_malloc(flagssize * sizeof(
                             opj_flag_t));
