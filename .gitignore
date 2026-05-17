@@ -16,3 +16,7 @@ scripts/opjstyle*
 
 # Ignore directories made by `make`.
 /bin/
+
+# Out-of-tree CMake build directories.
+/build/
+/build-*/
