@@ -58,14 +58,18 @@ expression is. The reader instance is firewalled from the implementer instance.
 MQ decoder + bitplane coder. Largest CPU share. Single-threaded so wins are
 cleanly measurable per codeblock.
 
-### Sub-project 2 — Codeblock-level threading
+### Sub-project 2 — Codeblock threading + tile-graph scheduling
 
-Decode independent codeblocks in parallel. Touches `tcd.c` orchestration and
-the t1 entry. Multiplies Sub-project 1's per-codeblock wins by core count.
-Largest practical wallclock win for any image with many codeblocks per
-component per resolution — which covers essentially every production workload
-(WSI tiles, geospatial scenes, large radiology series, multi-megapixel
-photographic images).
+*(Reframed 2026-05-17 after cleanroom audit — see §4.3.)* Decode independent
+codeblocks in parallel **and** express each tile's decompression as a DAG
+with cross-tile pipelining and parser back-pressure. Touches `tcd.c`
+orchestration, the t1 entry, and likely introduces a task-graph dependency
+(Taskflow or equivalent). Multiplies Sub-project 1's per-codeblock wins by
+core count and additionally extracts parallelism across components,
+resolutions, and tiles simultaneously. Largest practical wallclock win for
+any image with many codeblocks per component per resolution — which covers
+essentially every production workload (WSI tiles, geospatial scenes, large
+radiology series, multi-megapixel photographic images).
 
 ### Sub-project 3 — Inverse DWT polish
 
@@ -76,17 +80,26 @@ broadly — geospatial viewers (panning over a tiled GeoJP2), DICOM viewers
 (zooming into a region of a radiograph), and WSI viewers all decode partial
 regions, but vanilla openjpeg does not optimize for it.
 
+*(Augmented 2026-05-17 after cleanroom audit — see §4.4. Adds a 16-bit DWT
+path for 5/3 + ≤12-bit precision, a per-worker DWT scratch pool, and an
+open question on Highway-based SIMD dispatch.)*
+
 ### Sub-project 4 — MCT vectorization
 
 Inverse color transform. Memory-bound; gains from SIMD + cache-friendly access.
 Small file but disproportionately easy to win.
 
-### Sub-project 5 — TCD buffer + allocation churn
+### Sub-project 5 — TCD buffers, allocation churn, page release
 
 Reuse tile-component buffers across tiles in a session; eliminate per-tile
 mallocs. Less CPU-bound but matters for any session-style consumer:
 interactive viewers (WSI, geospatial, DICOM) that decode many tiles in
 sequence, and batch pipelines that process many images per process.
+
+*(Augmented 2026-05-17 after cleanroom audit — see §4.5. Adds a glibc /
+Windows `malloc_trim`-equivalent page release after tile-row drain, and
+incremental stripe compositing so resident memory tracks ~2 tile-rows
+rather than the whole tile-component plane.)*
 
 ### Out of scope
 
@@ -118,6 +131,7 @@ Out of scope here: threading, IDWT, MCT, TCD buffer mgmt.
 ### 2.2 Deliverables
 
 Each lands independently and is gated by the bench (see §2.5).
+*(D7, D8, D9 added 2026-05-17 from cleanroom audit findings — see §4.2.)*
 
 **D1 — Branchless MQ renormalize + packed state LUT.**
 Replace the `while (A < 0x8000)` renormalize loop with a `clz`-driven single
@@ -247,9 +261,12 @@ This same discipline propagates to every later sub-project.
   produce stripes narrower than the SIMD vector. *Mitigation:* scalar tail
   handler; benchmarked separately because ROI / partial-region decode is a
   cross-domain concern (geospatial, DICOM, WSI viewers all hit this path).
-- **Clean-room contamination.** The Sub-project 0.5 Grok report must be
-  audited before D1–D5 work begins, and the report-reader instance must not
-  be the same instance that implements.
+- **Clean-room contamination.** *(Status 2026-05-17: report audited and
+  folded into §4 by the implementing instance with the user's explicit
+  consent to override the original instance-firewall rule. Going forward,
+  the discipline that matters is: (a) do NOT mirror Grok-internal
+  identifier names in our code, (b) do NOT import Grok-tuning empirical
+  constants — re-derive them in the bench. See §4.1.)*
 
 ---
 
@@ -300,10 +317,166 @@ hardware, compiler, results table, conclusion (landed / reworked / abandoned).
 
 ---
 
-## 4. Next steps
+## 4. Findings from cleanroom Grok report *(added 2026-05-17)*
+
+### 4.1 Audit conclusion
+
+The Sub-project 0.5 cleanroom report (`docs/grok-cleanroom-research/`) was
+audited 2026-05-17 against the rules in §1 "Sub-project 0.5". Conclusion:
+**safe to use as input to spec and plan work in this fork**, with the
+following hard constraints carried forward:
+
+- The implementing instance MUST NOT mirror Grok-internal identifier names
+  observed in the report (e.g. anything matching a Grok class / member /
+  variable / CV name). Pick our own names.
+- Empirical Grok-tuning constants flagged by the report itself
+  (e.g. PCRD α=0.75, T1 early-stop window of 7, factor-of-3 bitplane
+  escalation) MUST NOT be imported literally. Re-derive any such value by
+  experiment in `openjp2k-bench`.
+- Mathematical constants from the JPEG 2000 standard (9/7 lifting
+  coefficients, BIBO bounds, etc.) are public-knowledge and freely usable.
+- Third-party library names cited as Grok dependencies (Taskflow, Highway,
+  OpenJPH, libcurl) are independently obtainable open-source projects;
+  naming them in our spec/plan is not a cleanroom concern.
+
+The report names four documents, of which the most relevant to this spec is
+`grok-performance-innovations.md`. Section references below (§G.x) point
+into that document for traceability.
+
+### 4.2 Additional deliverables for Sub-project 1 (T1)
+
+The report (§G.6) validates the spec's existing D1-D6 direction
+(particularly §G.6.2: MQ is fundamentally sequential, **do not vectorize
+it** — our D1 scalar-tightening framing is correct). Three additional
+small-but-concrete deliverables surfaced:
+
+- **D7 — Multi-buffer MQ input.** Today the decoder concatenates a
+  codeblock's segments into a single temporary buffer (`cblkdatabuffer`,
+  see t1.c:2054-2078). Eliminate the concatenation by teaching the MQ
+  state to step across an array of `(ptr,len)` chunks. Wins a memcpy per
+  multi-segment codeblock; matters most for codestreams with many
+  tile-parts or with PPM/PPT marker use. (Report ref: §G.6.9.)
+- **D8 — Pre-shifted context LUTs.** Bind the zero-coding / sign-coding
+  LUT pointer to the current subband's orientation at codeblock entry,
+  rather than re-doing the orientation arithmetic per coded symbol. Small
+  scalar win, no SIMD required. (Report ref: §G.6.4.)
+- **D9 — Coder pool keyed by `(worker, codeblock_size)`.** OpenJPEG's TLS
+  scheme stores one T1 instance per worker thread; the buffers are
+  resized as larger blocks appear. Keying additionally by codeblock-size
+  exponents means each (worker, size) combination has its scratch sized
+  exactly once and avoids the lazy-grow on heterogeneous codestreams.
+  Matters most for cross-domain corpora where different encoders produce
+  different block sizes within a session. Folds together with the
+  deferred D6.1-remainder (struct split) since both touch the same
+  per-worker state. (Report refs: §G.3.4, §G.6.6.)
+
+Ordering inside Sub-project 1 with these additions: D6 → D1 → D2 → D3 →
+D5 → D4 → D8 → D7 → D9. D8 / D7 are small follow-ups to the main T1 work;
+D9 should be planned after D6.1-remainder is settled so the two land
+together.
+
+### 4.3 Reframe for Sub-project 2 (codeblock threading)
+
+The existing description ("decode independent codeblocks in parallel") is
+too narrow. The report (§G.3) documents that the substantive threading win
+is architectural, not just per-codeblock parallelism — OpenJPEG already
+runs codeblock decode on a thread pool. Reframed scope:
+
+- **DAG-based per-tile scheduling.** Express each tile's decompression as
+  a directed acyclic graph (T2 → T1 → DWT-H → DWT-V → MCT) with explicit
+  dependencies. Tasks become runnable as predecessors complete, not when
+  the main thread joins a barrier. Cross-tile work fills the cores while
+  any individual tile is partially blocked. Candidate dependency:
+  Taskflow (MIT-licensed, single-header C++17; license-compatible).
+- **Cross-tile pipelining with parser back-pressure.** A parser thread
+  feeds tiles into the DAG ahead of the consumer by a small bounded
+  number of tile-rows (the report cites 2). Consumer-side advances a
+  drain pointer and wakes the parser when work has been retired.
+- **Per-tile-row completion tracking.** Glue between the DAG and the
+  consumer (compositor / writer), so row callbacks fire off the
+  completion-tracker lock to avoid serializing other workers.
+
+This expanded SP-2 is a significant architectural change; it likely splits
+into 2-3 sub-projects when planned in detail. (Report refs: §G.3.1, §G.3.3,
+§G.3.6, §G.3.7.)
+
+### 4.4 Additional deliverables for Sub-project 3 (IDWT)
+
+- **16-bit DWT path for 5/3 and ≤12-bit precision.** Promote the 5/3
+  reversible IDWT (and, optionally, a Q1.15 fixed-point 9/7) to operate on
+  `int16` coefficients when the codestream precision permits. Halves
+  bandwidth and cache footprint, which is decisive for memory-bound DWT.
+  Covers most DICOM (≤12-bit common) and 8-bit photographic — i.e. a
+  majority of the cross-domain corpus. Requires overflow-safe SIMD
+  averaging primitives; derivation is in the report. (Report refs:
+  §G.5.1-§G.5.5.)
+- **Per-worker wavelet scratch pool.** Same shape as the existing T1 coder
+  pool — pre-allocate DWT scratch per worker thread, no allocations during
+  the IDWT hot loop. (Report ref: §G.5.8.)
+- **Open question: Highway-based SIMD dispatch.** Google's Highway
+  (Apache-2.0) provides portable SIMD with runtime dispatch across SSE2 /
+  SSSE3 / AVX2 / AVX-512 / NEON / SVE / WASM / RISC-V V from a single
+  source. Alternative to maintaining hand-rolled per-target intrinsics for
+  the IDWT lifting kernels. Trade-off: dependency vs. maintenance burden.
+  Decide before D-IDWT-1 lands. (Report refs: §G.5.6, §G.10.2.)
+
+### 4.5 Additional deliverables for Sub-project 5 (TCD / buffers)
+
+- **Page release after tile-row drain.** A thin allocator wrapper that, in
+  addition to tracking aggregate live bytes for 64-byte alignment,
+  invokes `malloc_trim(0)` on glibc (and the equivalent on Windows /
+  macOS) immediately after a tile-row's data is released. Without this,
+  `free()` returns memory to the allocator's free list but RSS stays at
+  the high-water mark — defeating any incremental-memory work. (Report
+  ref: §G.3.5.)
+- **Incremental stripe compositing.** For session-style consumers
+  (viewers, batch processors) that consume image rows as they become
+  available, keep resident memory proportional to ~2 tile-rows rather
+  than the whole tile-component plane. Requires SP-2's per-tile-row
+  completion tracking and the page-release mechanism above. (Report refs:
+  §G.4.1-§G.4.6.)
+
+### 4.6 Provisional Sub-project 6 — cloud / random-access *(not yet in scope)*
+
+The report (§G.7, §G.8, §G.10) describes a substantial cloud-decode
+architecture: TLM/PLT marker-driven selective byte-range fetching,
+two-tier compressed-chunk cache (in-memory LRU + disk spill),
+HTTP/2-multiplexed range fetcher with connection pooling. This is
+transformative for cloud workloads (large WSI tiles on object storage,
+NITF on S3, etc.) but is **not currently in this fork's scope**.
+
+Add as Sub-project 6 only when a consumer surfaces concrete demand
+(e.g., openscope adds remote-corpus support, or a geospatial / pathology
+consumer asks for it). Note its existence here so it doesn't get
+re-invented during SP-2 planning. (Report refs: §G.7.1, §G.7.2, §G.8.1.)
+
+### 4.7 Explicitly out of scope
+
+In addition to HTJ2K (§1):
+
+- **Encoder PCRD slope-estimator early termination** (report §G.6.7,
+  §G.7.4). Encoder-side optimization; CLAUDE.md states encode is not a
+  priority. Documented here only so the area is not accidentally
+  inherited as a goal.
+- **Excalibur scheduler backend** (report §G.3.2). Per the report,
+  experimental / no documented use case in Grok. Skip.
+
+### 4.8 HTJ2K direction *(when revisited)*
+
+When HTJ2K is revisited (deferred per §1), the report (§G.6.8, §G.10.2)
+recommends embedding **OpenJPH** (BSD-2-Clause; Apache-2.0-compatible)
+rather than reimplementing Part-15 block coding ourselves. OpenJPH ships
+scalar / SSSE3 / AVX2 / AVX-512 variants and CPU-dispatches at module
+load. OpenJPEG ships its own `ht_dec.c` which is scalar-only on the
+MEL / VLC / MAGREF loops — a known performance gap.
+
+---
+
+## 5. Next steps
 
 1. Stand up Sub-project 0 (measurement scaffolding) in `openjp2k-bench`.
-2. Kick off Sub-project 0.5 (clean-room Grok report) in a separate AI
-   instance.
-3. Once 0 has baselines and 0.5 has been audited, generate the implementation
-   plan for Sub-project 1 starting with D6.
+2. ~~Kick off Sub-project 0.5 (clean-room Grok report) in a separate AI
+   instance.~~ *(Done 2026-05-17; audited and folded into §4.)*
+3. Once 0 has baselines, generate the implementation plan for Sub-project 1
+   starting with D6. (D6.5 + D6.1-trimmed + D6.2 landed 2026-05-17 ahead of
+   the bench; D1+ remain blocked on the bench.)
