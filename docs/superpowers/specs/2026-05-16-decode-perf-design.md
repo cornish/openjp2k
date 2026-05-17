@@ -155,6 +155,9 @@ cleanup that remains worthwhile.)*
 - **D6.1** Split `opj_t1_t` into `opj_t1_dec_t` and `opj_t1_enc_t`. Remove
   the `encoder` boolean and dual-purpose fields. Decoder hot path uses a
   smaller, decoder-only struct (better cache footprint, fewer branches).
+  *(Status 2026-05-17: dead `encoder` field landed; full struct split
+  deferred — revisit when D1 work surfaces what fields the fast paths
+  actually need.)*
 - **D6.2** Pre-size `data` and `flags` at tile setup using the tile's max
   codeblock dimensions, eliminating the cold-codeblock realloc path.
 - **D6.3** Pool per-codeblock `opj_t1_cblk_decode_processing_job_t`

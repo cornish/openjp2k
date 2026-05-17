@@ -556,6 +556,12 @@ The work is complete. PR creation is a separate human decision; this plan does n
 
 ## Notes for follow-up plans
 
+- **D6.1 (struct split) — partial.** This plan landed only the dead-field
+  removal portion of D6.1 (the `encoder` boolean). The full struct split
+  (`opj_t1_t` → `opj_t1_dec_t` + `opj_t1_enc_t`) was deferred because the
+  marginal cache-footprint win is small (~16 bytes per worker) and the
+  decoder-only field set will be clearer after D1 work surfaces what the
+  fast paths actually need on the struct. Revisit when planning D1 or D4.
 - **D6.3 (job pool)** — needs a survey of `opj_thread_pool_submit_job` semantics in `thread.c`: who owns the job pointer between submission and consumption, whether jobs may be cancelled, and whether the main thread blocks on completion. The shape of the freelist (per-pool with locking vs per-thread with handoff) depends on those answers.
 - **D6.4 (decoded_data buffer reuse)** — needs a redesign of `opj_tcd_cblk_dec_t::decoded_data` ownership. Currently the buffer is freed by tcd.c cleanup paths (tcd.c:1378, tcd.c:2389), which assumes per-cblk ownership. A reusable per-thread buffer would change that to "data is copied out of decoded_data and into tilec->data_win before the next codeblock reuses the buffer." Need to audit whether anything outside the t1 processor reads `cblk->decoded_data` between codeblocks.
 - **D1 (branchless MQ + packed state LUT)** — first deliverable that needs the cleanroom Grok report and the bench harness. Plan that deliverable only after Sub-projects 0 and 0.5 have landed.
