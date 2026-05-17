@@ -35,8 +35,19 @@ cmake --build build -j
 ctest --test-dir build
 ```
 
-Upstream's CTest suite is sizable; run a subset during iteration with
-`ctest -R <regex>`.
+Without `OPJ_DATA_ROOT` set, ~1200 tests fail because they can't find their
+input files — only the ~117 unit tests pass. The full ~1587-test
+conformance suite needs the cross-domain corpus in the sister repo
+`openjp2k-data` (which nests upstream's `openjpeg-data` at
+`corpus/conformance/openjpeg-data`). Easiest way:
+
+```sh
+scripts/run-conformance.sh                # auto-finds the sibling corpus
+scripts/run-conformance.sh -- -R NR-DEC   # subset selection
+```
+
+The script also accepts `OPJ_DATA_ROOT=/path` to override the sibling-path
+auto-discovery. Run a smaller subset during iteration with `ctest -R <regex>`.
 
 ## Where performance work lives
 
