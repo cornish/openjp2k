@@ -1492,7 +1492,6 @@ static OPJ_BOOL opj_t1_allocate_buffers(
         OPJ_UINT32 flags_height = (h + 3U) / 4U;
 
         if (flagssize > t1->flagssize) {
-
             opj_aligned_free(t1->flags);
             t1->flags = (opj_flag_t*) opj_aligned_malloc(flagssize * sizeof(
                             opj_flag_t));
@@ -1687,6 +1686,17 @@ static void opj_t1_clbl_decode_processor(void* user_data, opj_tls_t* tls)
         }
     }
     t1->mustuse_cblkdatabuffer = job->mustuse_cblkdatabuffer;
+
+    /* D6.2: pre-size t1 buffers to the tile-component's max codeblock dims so
+     * the per-codeblock opj_t1_allocate_buffers call later in the function is
+     * a no-op. tccp->cblkw / cblkh are log2 exponents per the J2K spec. */
+    if (!opj_t1_allocate_buffers(t1, 1u << tccp->cblkw, 1u << tccp->cblkh)) {
+        opj_event_msg(job->p_manager, EVT_ERROR,
+                      "Cannot pre-size T1 buffers for tile component\n");
+        *(job->pret) = OPJ_FALSE;
+        opj_free(job);
+        return;
+    }
 
     if ((tccp->cblksty & J2K_CCP_CBLKSTY_HT) != 0) {
         if (OPJ_FALSE == opj_t1_ht_decode_cblk(
