@@ -1,8 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Toby Cornish
+
 /*
- * SPDX-License-Identifier: Apache-2.0
- *
- * Copyright (c) 2026, Toby Cornish
- *
  * Optimized T1 (entropy decode) variants for openjp2k.
  *
  * This translation unit is intentionally empty in the initial scaffolding
