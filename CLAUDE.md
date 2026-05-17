@@ -80,6 +80,25 @@ git merge upstream/master           # they're on 'master', we're on 'main'
 Merge upstream periodically (monthly-ish) so divergence stays manageable.
 Expect conflicts on files we've modified for performance.
 
+## Benchmarking & versioning
+
+Bench results identify openjp2k by **commit SHA**, not release tag. The
+sister `openjp2k-bench` harness captures `git rev-parse HEAD` and
+`git describe --tags --always --dirty` at build time and embeds both in
+every result row. Why: the perf gate fires per deliverable (per commit),
+and bisecting regressions wants per-commit data. Dirty-tree builds are
+recorded but flagged untrustworthy and rejected by the merge gate.
+
+Tags layer on top for external communication: cut one when a sub-project
+deliverable lands and shows a meaningful win (e.g.
+`v0.3.0-d1-mq-tightening`). External claims need both sides tagged
+(`openjp2k v0.3 vs openjpeg 2.5.3 vs grok v20`). Don't wait for a tag to
+bench — bench every meaningful change by SHA, tag the noteworthy ones.
+
+Full convention lives in
+[`docs/superpowers/specs/2026-05-16-decode-perf-design.md`](docs/superpowers/specs/2026-05-16-decode-perf-design.md)
+§3.6.
+
 ## Sibling repos
 
 - **[cornish/openjp2k-bench](https://github.com/cornish/openjp2k-bench)** —

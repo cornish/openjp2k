@@ -315,6 +315,38 @@ possible. The bench enforces this; this fork exposes the seams.
 measured change. Format: deliverable ID, date, commit SHA, corpus version,
 hardware, compiler, results table, conclusion (landed / reworked / abandoned).
 
+### 3.6 Result identification — commits, tags, releases
+
+**Bench results are identified by commit SHA, not release tag.** The bench
+harness captures `git rev-parse HEAD` and `git describe --tags --always
+--dirty` at build time and embeds both in every result row. Rationale:
+
+- The §2.7 gate fires per deliverable, which is per-commit cadence — not
+  per-release. We need to measure every deliverable as it lands.
+- Bisecting a regression requires per-commit data; tag-only data forces
+  re-bench of every intermediate commit anyway.
+- Dirty-tree builds (`*-dirty` suffix from `git describe`) are recorded
+  but flagged as untrustworthy and **rejected by the §2.7 gate** for
+  merge claims.
+
+**Tags layer on top, for external communication and stable baselines.** Cut
+a tag (e.g. `v0.3.0-d1-mq-tightening`) when a sub-project deliverable
+lands and shows a meaningful win. The tag is a memorable handle for the
+same SHA the perf-log already recorded. External claims ("openjp2k 0.3
+beats vanilla openjpeg 2.5.3 by 1.4× on the medical corpus") require both
+sides to be tagged.
+
+**Cross-codec comparison points use the other codec's releases:**
+
+- Vanilla openjpeg: by release version (e.g. `openjpeg 2.5.3`).
+- Grok: by release version (e.g. `grok v20`; see project memory note on
+  Grok API version).
+- Kakadu: by published-numbers version (e.g. `kakadu 8.4` from their
+  benchmark page); no in-house bench adapter.
+
+A typical perf-log line therefore reads:
+`openjp2k@92fe5f06 (tag v0.3.0-d1) vs openjpeg 2.5.3 vs grok v20`.
+
 ---
 
 ## 4. Findings from cleanroom Grok report *(added 2026-05-17)*
