@@ -1688,23 +1688,6 @@ static void opj_t1_clbl_decode_processor(void* user_data, opj_tls_t* tls)
     }
     t1->mustuse_cblkdatabuffer = job->mustuse_cblkdatabuffer;
 
-    /* D6.2: pre-size t1 buffers to the tile-component's max codeblock dims so
-     * the per-codeblock opj_t1_allocate_buffers call later in the function is
-     * a no-op. tccp->cblkw / cblkh are log2 exponents per the J2K spec. */
-    if (!opj_t1_allocate_buffers(t1, 1u << tccp->cblkw, 1u << tccp->cblkh)) {
-        if (job->p_manager_mutex) {
-            opj_mutex_lock(job->p_manager_mutex);
-        }
-        opj_event_msg(job->p_manager, EVT_ERROR,
-                      "Cannot pre-size T1 buffers for tile component\n");
-        if (job->p_manager_mutex) {
-            opj_mutex_unlock(job->p_manager_mutex);
-        }
-        *(job->pret) = OPJ_FALSE;
-        opj_free(job);
-        return;
-    }
-
     if ((tccp->cblksty & J2K_CCP_CBLKSTY_HT) != 0) {
         if (OPJ_FALSE == opj_t1_ht_decode_cblk(
                     t1,
