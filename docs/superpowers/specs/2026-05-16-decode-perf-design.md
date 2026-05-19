@@ -172,8 +172,18 @@ cleanup that remains worthwhile.)*
   *(Status 2026-05-17: dead `encoder` field landed; full struct split
   deferred — revisit when D1 work surfaces what fields the fast paths
   actually need.)*
-- **D6.2** Pre-size `data` and `flags` at tile setup using the tile's max
-  codeblock dimensions, eliminating the cold-codeblock realloc path.
+- **D6.2** ~~Pre-size `data` and `flags` at tile setup using the tile's max
+  codeblock dimensions, eliminating the cold-codeblock realloc path.~~
+  *(Tried 2026-05-17 (commit `9ffb3fc8`), reverted 2026-05-19 (commit
+  `9300925d`) after bench-bisect. Premise was wrong: `opj_t1_allocate_buffers`
+  does more than realloc — it also memsets `data`/`flags` and reseeds the
+  boundary flag rows. The realloc itself was already amortized via the
+  high-water-mark check, so the pre-size eliminated cold work but added a
+  redundant max-sized memset on every `clbl_decode_processor` entry. Net
+  +5.4µs / +18% on the decode stage of small files (e.g. `p1_07.j2k`);
+  ~1.4% gmean drag across the corpus. Don't re-attempt without first
+  changing `opj_t1_allocate_buffers` so the memset+boundary-flag step is
+  skippable on already-zeroed buffers.)*
 - **D6.3** Pool per-codeblock `opj_t1_cblk_decode_processing_job_t`
   allocations.
 - **D6.4** Route `cblk->decoded_data` in non-whole-tile mode through a
@@ -510,5 +520,7 @@ MEL / VLC / MAGREF loops — a known performance gap.
 2. ~~Kick off Sub-project 0.5 (clean-room Grok report) in a separate AI
    instance.~~ *(Done 2026-05-17; audited and folded into §4.)*
 3. Once 0 has baselines, generate the implementation plan for Sub-project 1
-   starting with D6. (D6.5 + D6.1-trimmed + D6.2 landed 2026-05-17 ahead of
-   the bench; D1+ remain blocked on the bench.)
+   starting with D6. (D6.5 + D6.1-trimmed landed 2026-05-17 ahead of the
+   bench; D6.2 landed 2026-05-17 and was reverted 2026-05-19 after bisect
+   showed a measured regression — see §2.2 D6.2 entry. D1+ remain blocked
+   on the bench.)
