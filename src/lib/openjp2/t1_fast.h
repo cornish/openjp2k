@@ -30,6 +30,7 @@ int opj_t1_fast_enabled(void);
  * opj_includes.h by every TU that includes this header. */
 void opj_t1_fast_dec_sigpass_mqc(opj_t1_t *t1, OPJ_INT32 bpno, OPJ_INT32 cblksty);
 void opj_t1_fast_dec_refpass_mqc(opj_t1_t *t1, OPJ_INT32 bpno);
+void opj_t1_fast_dec_clnpass(opj_t1_t *t1, OPJ_INT32 bpno, OPJ_INT32 cblksty);
 #endif
 
 #ifdef __cplusplus
