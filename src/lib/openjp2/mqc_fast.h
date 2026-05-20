@@ -127,6 +127,29 @@ void opj_mqc_fast_setstate(OPJ_UINT32 *ctxs_idx, OPJ_UINT32 ctxno,
         (mqc)->a = (a); \
         (mqc)->ct = (ct);
 
+/*
+ * 32-bit count-leading-zeros. Defined for x > 0; result is undefined
+ * for x = 0 (matches __builtin_clz / lzcnt).
+ */
+#if defined(__GNUC__) || defined(__clang__)
+static INLINE OPJ_UINT32 opj_mqc_clz32(OPJ_UINT32 x) {
+    return (OPJ_UINT32)__builtin_clz(x);
+}
+#elif defined(_MSC_VER)
+#include <intrin.h>
+static INLINE OPJ_UINT32 opj_mqc_clz32(OPJ_UINT32 x) {
+    unsigned long idx;
+    _BitScanReverse(&idx, x);
+    return 31u - idx;
+}
+#else
+static INLINE OPJ_UINT32 opj_mqc_clz32(OPJ_UINT32 x) {
+    OPJ_UINT32 n = 0;
+    while ((x & 0x80000000u) == 0) { x <<= 1; n++; }
+    return n;
+}
+#endif
+
 #ifdef __cplusplus
 }
 #endif

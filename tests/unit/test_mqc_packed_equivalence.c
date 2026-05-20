@@ -78,5 +78,29 @@ int main(void)
         return 1;
     }
     printf("test_mqc_packed_equivalence: 94 states verified\n");
+
+    /* opj_mqc_clz32 verification: 7 edge-and-typical cases. */
+    {
+        struct { OPJ_UINT32 in; OPJ_UINT32 want; } cases[] = {
+            {0x00000001u, 31u},
+            {0x00000002u, 30u},
+            {0x00007FFFu, 17u},
+            {0x00008000u, 16u},
+            {0x40000000u,  1u},
+            {0x80000000u,  0u},
+            {0xFFFFFFFFu,  0u},
+        };
+        OPJ_UINT32 k;
+        OPJ_UINT32 got;
+        for (k = 0; k < sizeof(cases)/sizeof(cases[0]); ++k) {
+            got = opj_mqc_clz32(cases[k].in);
+            if (got != cases[k].want) {
+                fprintf(stderr, "clz32(0x%08X)=%u; want %u\n",
+                        cases[k].in, got, cases[k].want);
+                return 1;
+            }
+        }
+        printf("opj_mqc_clz32: 7 cases verified\n");
+    }
     return 0;
 }
