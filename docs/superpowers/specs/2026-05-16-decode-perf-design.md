@@ -139,6 +139,8 @@ shift. Pack `(Qe, NMPS, NLPS, switch_flag)` into one 32-bit entry per state so
 a decode step touches one cache line. Keep MQ state register-resident through
 the inner loop.
 
+*(Status 2026-05-19: D1.0 (verification harness) landed. opj_t1_fast_enabled() runtime switch + test_mqc_dump dumper + scripts/run_diff_test.sh subprocess wrapper provide byte-exact A/B diffing. Gated in ctest as `mqc_diff_fast` (10 conformance files, <30s). Diff-test runs 0-failed against smoke corpus (synthetic-iter, 90 files), conformance/nonregression subset, and OPJ_T1_LEGACY_ONLY build is clean. D1.1 (packed-state LUT) next.)*
+
 **D2 — Pass-dispatch despecialization.**
 Today the SP/MR/CU passes are reached via function-pointer dispatch
 parameterized by codeblock style. Generate compile-time-specialized variants
