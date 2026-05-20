@@ -38,6 +38,9 @@
  * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ *
+ * SPDX-License-Identifier: BSD-2-Clause
+ * Modifications copyright 2026 Toby Cornish
  */
 
 /*
@@ -47,8 +50,6 @@
  * duplicating source.  Both t1.c and t1_fast.c include this header
  * after their respective includes of opj_includes.h (which pulls in
  * t1.h for opj_flag_t / opj_mqc_t etc.) and t1_luts.h.
- *
- * SPDX-License-Identifier: BSD-2-Clause
  */
 
 #ifndef OPJ_T1_INL_H
