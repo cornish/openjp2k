@@ -33,6 +33,15 @@ target_link_libraries(test_mqc_diff openjp2)
 add_executable(test_mqc_dump test_mqc_dump.c)
 target_link_libraries(test_mqc_dump openjp2)
 
+# Structural equivalence test for the packed MQ state table.
+# Verifies index ranges, switch_flag correctness, and the J2K Annex C
+# even/odd mirror invariant against opj_mqc_states_packed[].
+add_executable(test_mqc_packed_equivalence test_mqc_packed_equivalence.c)
+target_link_libraries(test_mqc_packed_equivalence openjp2)
+target_include_directories(test_mqc_packed_equivalence PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/lib/openjp2)
+add_test(NAME mqc_packed_equivalence COMMAND test_mqc_packed_equivalence)
+
 # Tiny diff-test subset: 10 files, runs in <30s. Larger sweeps are
 # invoked via scripts/run_diff_test.sh outside ctest.
 set(MQC_DIFF_FAST_CORPUS
