@@ -55,7 +55,7 @@
 #pragma GCC poison malloc calloc realloc free
 #endif
 
-#include "t1_luts.h"
+#include "t1_inl.h"
 
 /** @defgroup T1 T1 - Implementation of the tier-1 coding */
 /*@{*/
@@ -74,13 +74,10 @@
 /** @name Local static functions */
 /*@{*/
 
-static INLINE OPJ_BYTE opj_t1_getctxno_zc(opj_mqc_t *mqc, OPJ_UINT32 f);
-static INLINE OPJ_UINT32 opj_t1_getctxno_mag(OPJ_UINT32 f);
+/* opj_t1_getctxno_zc, opj_t1_getctxno_mag, opj_t1_update_flags:
+ * provided by t1_inl.h (included above via #include "t1_inl.h"). */
 static OPJ_INT16 opj_t1_getnmsedec_sig(OPJ_UINT32 x, OPJ_UINT32 bitpos);
 static OPJ_INT16 opj_t1_getnmsedec_ref(OPJ_UINT32 x, OPJ_UINT32 bitpos);
-static INLINE void opj_t1_update_flags(opj_flag_t *flagsp, OPJ_UINT32 ci,
-                                       OPJ_UINT32 s, OPJ_UINT32 stride,
-                                       OPJ_UINT32 vsc);
 
 
 /**
@@ -251,57 +248,9 @@ static OPJ_BOOL opj_t1_allocate_buffers(opj_t1_t *t1,
 
 /* ----------------------------------------------------------------------- */
 
-static INLINE OPJ_BYTE opj_t1_getctxno_zc(opj_mqc_t *mqc, OPJ_UINT32 f)
-{
-    return mqc->lut_ctxno_zc_orient[(f & T1_SIGMA_NEIGHBOURS)];
-}
-
-static INLINE OPJ_UINT32 opj_t1_getctxtno_sc_or_spb_index(OPJ_UINT32 fX,
-        OPJ_UINT32 pfX,
-        OPJ_UINT32 nfX,
-        OPJ_UINT32 ci)
-{
-    /*
-      0 pfX T1_CHI_THIS           T1_LUT_SGN_W
-      1 tfX T1_SIGMA_1            T1_LUT_SIG_N
-      2 nfX T1_CHI_THIS           T1_LUT_SGN_E
-      3 tfX T1_SIGMA_3            T1_LUT_SIG_W
-      4  fX T1_CHI_(THIS - 1)     T1_LUT_SGN_N
-      5 tfX T1_SIGMA_5            T1_LUT_SIG_E
-      6  fX T1_CHI_(THIS + 1)     T1_LUT_SGN_S
-      7 tfX T1_SIGMA_7            T1_LUT_SIG_S
-    */
-
-    OPJ_UINT32 lu = (fX >> (ci * 3U)) & (T1_SIGMA_1 | T1_SIGMA_3 | T1_SIGMA_5 |
-                                         T1_SIGMA_7);
-
-    lu |= (pfX >> (T1_CHI_THIS_I      + (ci * 3U))) & (1U << 0);
-    lu |= (nfX >> (T1_CHI_THIS_I - 2U + (ci * 3U))) & (1U << 2);
-    if (ci == 0U) {
-        lu |= (fX >> (T1_CHI_0_I - 4U)) & (1U << 4);
-    } else {
-        lu |= (fX >> (T1_CHI_1_I - 4U + ((ci - 1U) * 3U))) & (1U << 4);
-    }
-    lu |= (fX >> (T1_CHI_2_I - 6U + (ci * 3U))) & (1U << 6);
-    return lu;
-}
-
-static INLINE OPJ_BYTE opj_t1_getctxno_sc(OPJ_UINT32 lu)
-{
-    return lut_ctxno_sc[lu];
-}
-
-static INLINE OPJ_UINT32 opj_t1_getctxno_mag(OPJ_UINT32 f)
-{
-    OPJ_UINT32 tmp = (f & T1_SIGMA_NEIGHBOURS) ? T1_CTXNO_MAG + 1 : T1_CTXNO_MAG;
-    OPJ_UINT32 tmp2 = (f & T1_MU_0) ? T1_CTXNO_MAG + 2 : tmp;
-    return tmp2;
-}
-
-static INLINE OPJ_BYTE opj_t1_getspb(OPJ_UINT32 lu)
-{
-    return lut_spb[lu];
-}
+/* opj_t1_getctxno_zc, opj_t1_getctxtno_sc_or_spb_index,
+ * opj_t1_getctxno_sc, opj_t1_getctxno_mag, opj_t1_getspb:
+ * now provided by t1_inl.h (included above). */
 
 static OPJ_INT16 opj_t1_getnmsedec_sig(OPJ_UINT32 x, OPJ_UINT32 bitpos)
 {
@@ -321,41 +270,8 @@ static OPJ_INT16 opj_t1_getnmsedec_ref(OPJ_UINT32 x, OPJ_UINT32 bitpos)
     return lut_nmsedec_ref0[x & ((1 << T1_NMSEDEC_BITS) - 1)];
 }
 
-#define opj_t1_update_flags_macro(flags, flagsp, ci, s, stride, vsc) \
-{ \
-    /* east */ \
-    flagsp[-1] |= T1_SIGMA_5 << (3U * ci); \
- \
-    /* mark target as significant */ \
-    flags |= ((s << T1_CHI_1_I) | T1_SIGMA_4) << (3U * ci); \
- \
-    /* west */ \
-    flagsp[1] |= T1_SIGMA_3 << (3U * ci); \
- \
-    /* north-west, north, north-east */ \
-    if (ci == 0U && !(vsc)) { \
-        opj_flag_t* north = flagsp - (stride); \
-        *north |= (s << T1_CHI_5_I) | T1_SIGMA_16; \
-        north[-1] |= T1_SIGMA_17; \
-        north[1] |= T1_SIGMA_15; \
-    } \
- \
-    /* south-west, south, south-east */ \
-    if (ci == 3U) { \
-        opj_flag_t* south = flagsp + (stride); \
-        *south |= (s << T1_CHI_0_I) | T1_SIGMA_1; \
-        south[-1] |= T1_SIGMA_2; \
-        south[1] |= T1_SIGMA_0; \
-    } \
-}
-
-
-static INLINE void opj_t1_update_flags(opj_flag_t *flagsp, OPJ_UINT32 ci,
-                                       OPJ_UINT32 s, OPJ_UINT32 stride,
-                                       OPJ_UINT32 vsc)
-{
-    opj_t1_update_flags_macro(*flagsp, flagsp, ci, s, stride, vsc);
-}
+/* opj_t1_update_flags_macro and opj_t1_update_flags:
+ * now provided by t1_inl.h (included above). */
 
 /**
 Encode significant pass
