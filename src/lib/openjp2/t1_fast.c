@@ -53,7 +53,7 @@ int opj_t1_fast_enabled(void)
 /* Fast equivalent of the t1.c-local opj_t1_setcurctx macro. Requires
  * 'mqc' to be in scope (same macro-hygiene assumption as the legacy). */
 #define opj_t1_setcurctx_fast(curidx, ctxno) \
-    (curidx) = (mqc)->ctxs_idx[(OPJ_UINT32)(ctxno)]
+    (curidx) = &(mqc)->ctxs_idx[(OPJ_UINT32)(ctxno)]
 
 /* Clone of opj_t1_dec_sigpass_step_mqc_macro (t1.c:436-460). */
 #define opj_t1_dec_sigpass_step_mqc_fast_macro(flags, flagsp, flags_stride, data, \

@@ -56,6 +56,7 @@
 #endif
 
 #include "t1_inl.h"
+#include "t1_fast.h"
 
 /** @defgroup T1 T1 - Implementation of the tier-1 coding */
 /*@{*/
@@ -1929,6 +1930,7 @@ static OPJ_BOOL opj_t1_decode_cblk(opj_t1_t *t1,
     OPJ_UINT32 cblkdataindex = 0;
     OPJ_BYTE type = T1_TYPE_MQ; /* BYPASS mode */
     OPJ_INT32* original_t1_data = NULL;
+    int use_fast = opj_t1_fast_enabled();
 
     mqc->lut_ctxno_zc_orient = lut_ctxno_zc + (orient << 9);
 
@@ -2034,6 +2036,8 @@ static OPJ_BOOL opj_t1_decode_cblk(opj_t1_t *t1,
             case 0:
                 if (type == T1_TYPE_RAW) {
                     opj_t1_dec_sigpass_raw(t1, bpno_plus_one, (OPJ_INT32)cblksty);
+                } else if (use_fast) {
+                    opj_t1_fast_dec_sigpass_mqc(t1, bpno_plus_one, (OPJ_INT32)cblksty);
                 } else {
                     opj_t1_dec_sigpass_mqc(t1, bpno_plus_one, (OPJ_INT32)cblksty);
                 }
@@ -2041,12 +2045,18 @@ static OPJ_BOOL opj_t1_decode_cblk(opj_t1_t *t1,
             case 1:
                 if (type == T1_TYPE_RAW) {
                     opj_t1_dec_refpass_raw(t1, bpno_plus_one);
+                } else if (use_fast) {
+                    opj_t1_fast_dec_refpass_mqc(t1, bpno_plus_one);
                 } else {
                     opj_t1_dec_refpass_mqc(t1, bpno_plus_one);
                 }
                 break;
             case 2:
-                opj_t1_dec_clnpass(t1, bpno_plus_one, (OPJ_INT32)cblksty);
+                if (use_fast) {
+                    opj_t1_fast_dec_clnpass(t1, bpno_plus_one, (OPJ_INT32)cblksty);
+                } else {
+                    opj_t1_dec_clnpass(t1, bpno_plus_one, (OPJ_INT32)cblksty);
+                }
                 break;
             }
 

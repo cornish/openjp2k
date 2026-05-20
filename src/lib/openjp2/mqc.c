@@ -477,6 +477,7 @@ void opj_mqc_resetstates(opj_mqc_t *mqc)
         mqc->ctxs[i] = mqc_states;
         mqc->ctxs_idx[i] = 0;
     }
+    mqc->curctx_idx = &mqc->ctxs_idx[0];
 }
 
 void opj_mqc_setstate(opj_mqc_t *mqc, OPJ_UINT32 ctxno, OPJ_UINT32 msb,

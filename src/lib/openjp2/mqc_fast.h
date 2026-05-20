@@ -72,12 +72,12 @@ void opj_mqc_fast_setstate(OPJ_UINT32 *ctxs_idx, OPJ_UINT32 ctxno,
  *
  *   d        : output bit
  *   mqc      : opj_mqc_t*
- *   curidx   : OPJ_UINT32 (mqc->curctx_idx by convention)
+ *   curidx   : OPJ_UINT32 * (pointer to active slot in mqc->ctxs_idx[])
  *   a, c, ct : registers downloaded from mqc
  */
 #define opj_mqc_fast_decode_macro(d, mqc, curidx, a, c, ct) \
 { \
-    OPJ_UINT32 _pkd = opj_mqc_states_packed[(curidx)]; \
+    OPJ_UINT32 _pkd = opj_mqc_states_packed[*(curidx)]; \
     OPJ_UINT32 _qe = OPJ_MQC_PACK_QEVAL(_pkd); \
     OPJ_UINT32 _mps = OPJ_MQC_PACK_MPS(_pkd); \
     (a) -= _qe; \
@@ -87,11 +87,11 @@ void opj_mqc_fast_setstate(OPJ_UINT32 *ctxs_idx, OPJ_UINT32 ctxno,
             /* MPS exchange: a = qeval, d = mps, transition NMPS */ \
             (a) = _qe; \
             (d) = _mps; \
-            (curidx) = OPJ_MQC_PACK_NMPS_IDX(_pkd); \
+            *(curidx) = OPJ_MQC_PACK_NMPS_IDX(_pkd); \
         } else { \
             (a) = _qe; \
             (d) = !_mps; \
-            (curidx) = OPJ_MQC_PACK_NLPS_IDX(_pkd); \
+            *(curidx) = OPJ_MQC_PACK_NLPS_IDX(_pkd); \
         } \
         opj_mqc_fast_renormd_macro((mqc), (a), (c), (ct)); \
     } else { \
@@ -100,10 +100,10 @@ void opj_mqc_fast_setstate(OPJ_UINT32 *ctxs_idx, OPJ_UINT32 ctxno,
             /* MPS exchange */ \
             if ((a) < _qe) { \
                 (d) = !_mps; \
-                (curidx) = OPJ_MQC_PACK_NLPS_IDX(_pkd); \
+                *(curidx) = OPJ_MQC_PACK_NLPS_IDX(_pkd); \
             } else { \
                 (d) = _mps; \
-                (curidx) = OPJ_MQC_PACK_NMPS_IDX(_pkd); \
+                *(curidx) = OPJ_MQC_PACK_NMPS_IDX(_pkd); \
             } \
             opj_mqc_fast_renormd_macro((mqc), (a), (c), (ct)); \
         } else { \
@@ -113,10 +113,10 @@ void opj_mqc_fast_setstate(OPJ_UINT32 *ctxs_idx, OPJ_UINT32 ctxno,
 }
 
 #define opj_mqc_fast_setcurctx_idx(mqc, ctxno) \
-    ((mqc)->curctx_idx = (mqc)->ctxs_idx[(OPJ_UINT32)(ctxno)])
+    ((mqc)->curctx_idx = &(mqc)->ctxs_idx[(OPJ_UINT32)(ctxno)])
 
 #define DOWNLOAD_MQC_FAST_VARIABLES(mqc, curidx, a, c, ct) \
-        register OPJ_UINT32 curidx = (mqc)->curctx_idx; \
+        register OPJ_UINT32 *curidx = (mqc)->curctx_idx; \
         register OPJ_UINT32 c = (mqc)->c; \
         register OPJ_UINT32 a = (mqc)->a; \
         register OPJ_UINT32 ct = (mqc)->ct

@@ -95,12 +95,13 @@ typedef struct opj_mqc {
     /** Original value of the 2 bytes at end[0] and end[1] */
     OPJ_BYTE backup[OPJ_COMMON_CBLK_DATA_EXTRA];
     /* D1.1: parallel fast-path state. ctxs_idx[k] holds the index into
-     * opj_mqc_states_packed[] for context k; curctx_idx is the index
-     * for the active context. Kept in sync with ctxs[] / curctx by
+     * opj_mqc_states_packed[] for context k; curctx_idx is a pointer to
+     * the active slot in ctxs_idx[], mirroring the legacy curctx which
+     * points into ctxs[]. Kept in sync with ctxs[] / curctx by
      * opj_mqc_resetstates and opj_mqc_setstate so the fast path can
      * pick up from legacy init without an extra setup pass. */
     OPJ_UINT32 ctxs_idx[MQC_NUMCTXS];
-    OPJ_UINT32 curctx_idx;
+    OPJ_UINT32 *curctx_idx;
 } opj_mqc_t;
 
 #define BYPASS_CT_INIT  0xDEADBEEF
@@ -146,7 +147,7 @@ Set the current context used for coding/decoding
 #define opj_mqc_setcurctx(mqc, ctxno) \
     do { \
         (mqc)->curctx = &(mqc)->ctxs[(OPJ_UINT32)(ctxno)]; \
-        (mqc)->curctx_idx = (mqc)->ctxs_idx[(OPJ_UINT32)(ctxno)]; \
+        (mqc)->curctx_idx = &(mqc)->ctxs_idx[(OPJ_UINT32)(ctxno)]; \
     } while (0)
 
 /**
