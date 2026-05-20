@@ -202,4 +202,126 @@ void opj_t1_fast_dec_sigpass_mqc(
     }
 }
 
+/* -----------------------------------------------------------------------
+ * refpass fast clone
+ *
+ * Mechanically mirrors the legacy opj_t1_dec_refpass_mqc dispatch +
+ * 2 specializations + internal macro + step macro + step function,
+ * with the same substitutions as sigpass:
+ *
+ *   opj_mqc_decode_macro(v, mqc, curctx, a, c, ct)
+ *       -> opj_mqc_fast_decode_macro(v, mqc, curidx, a, c, ct)
+ *   opj_t1_setcurctx(curctx, X)
+ *       -> opj_t1_setcurctx_fast(curidx, X)
+ *   DOWNLOAD_MQC_VARIABLES(mqc, curctx, a, c, ct)
+ *       -> DOWNLOAD_MQC_FAST_VARIABLES(mqc, curidx, a, c, ct)
+ *   UPLOAD_MQC_VARIABLES(mqc, curctx, a, c, ct)
+ *       -> UPLOAD_MQC_FAST_VARIABLES(mqc, curidx, a, c, ct)
+ *
+ * Note: refpass has no vsc variants (only 64x64 vs generic).
+ * ----------------------------------------------------------------------- */
+
+/* Clone of opj_t1_dec_refpass_step_mqc_macro (t1.c:702-713). */
+#define opj_t1_dec_refpass_step_mqc_fast_macro(flags, data, data_stride, ci, \
+                                               mqc, curidx, v, a, c, ct, poshalf) \
+{ \
+    if ((flags & ((T1_SIGMA_THIS | T1_PI_THIS) << (ci * 3U))) == \
+            (T1_SIGMA_THIS << (ci * 3U))) { \
+        OPJ_UINT32 ctxt = opj_t1_getctxno_mag(flags >> (ci * 3U)); \
+        opj_t1_setcurctx_fast(curidx, ctxt); \
+        opj_mqc_fast_decode_macro(v, mqc, curidx, a, c, ct); \
+        data[ci*data_stride] += (v ^ (data[ci*data_stride] < 0)) ? poshalf : -poshalf; \
+        flags |= T1_MU_THIS << (ci * 3U); \
+    } \
+}
+
+/* Clone of opj_t1_dec_refpass_step_mqc (t1.c:715-728). */
+static INLINE void opj_t1_dec_refpass_step_mqc_fast(
+    opj_t1_t *t1,
+    opj_flag_t *flagsp,
+    OPJ_INT32 *datap,
+    OPJ_INT32 poshalf,
+    OPJ_UINT32 ci)
+{
+    OPJ_UINT32 v;
+
+    opj_mqc_t *mqc = &(t1->mqc);       /* MQC component */
+    opj_t1_dec_refpass_step_mqc_fast_macro(*flagsp, datap, 0, ci,
+                                           mqc, mqc->curctx_idx, v, mqc->a, mqc->c,
+                                           mqc->ct, poshalf);
+}
+
+/* Clone of opj_t1_dec_refpass_mqc_internal (t1.c:897-937). */
+#define opj_t1_dec_refpass_mqc_fast_internal(t1, bpno, w, h, flags_stride) \
+{ \
+        OPJ_INT32 one, poshalf; \
+        OPJ_UINT32 i, j, k; \
+        register OPJ_INT32 *data = t1->data; \
+        register opj_flag_t *flagsp = &t1->flags[flags_stride + 1]; \
+        const OPJ_UINT32 l_w = w; \
+        opj_mqc_t* mqc = &(t1->mqc); \
+        DOWNLOAD_MQC_FAST_VARIABLES(mqc, curidx, a, c, ct); \
+        register OPJ_UINT32 v; \
+        one = 1 << bpno; \
+        poshalf = one >> 1; \
+        for (k = 0; k < (h & ~3u); k += 4, data += 3*l_w, flagsp += 2) { \
+                for (i = 0; i < l_w; ++i, ++data, ++flagsp) { \
+                        opj_flag_t flags = *flagsp; \
+                        if( flags != 0 ) { \
+                            opj_t1_dec_refpass_step_mqc_fast_macro( \
+                                flags, data, l_w, 0, \
+                                mqc, curidx, v, a, c, ct, poshalf); \
+                            opj_t1_dec_refpass_step_mqc_fast_macro( \
+                                flags, data, l_w, 1, \
+                                mqc, curidx, v, a, c, ct, poshalf); \
+                            opj_t1_dec_refpass_step_mqc_fast_macro( \
+                                flags, data, l_w, 2, \
+                                mqc, curidx, v, a, c, ct, poshalf); \
+                            opj_t1_dec_refpass_step_mqc_fast_macro( \
+                                flags, data, l_w, 3, \
+                                mqc, curidx, v, a, c, ct, poshalf); \
+                            *flagsp = flags; \
+                        } \
+                } \
+        } \
+        UPLOAD_MQC_FAST_VARIABLES(mqc, curidx, a, c, ct); \
+        if( k < h ) { \
+            for (i = 0; i < l_w; ++i, ++data, ++flagsp) { \
+                for (j = 0; j < h - k; ++j) { \
+                        opj_t1_dec_refpass_step_mqc_fast(t1, flagsp, data + j * l_w, poshalf, j); \
+                } \
+            } \
+        } \
+}
+
+/* Clone of opj_t1_dec_refpass_mqc_64x64 (t1.c:939-944). */
+static void opj_t1_dec_refpass_mqc_fast_64x64(
+    opj_t1_t *t1,
+    OPJ_INT32 bpno)
+{
+    opj_t1_dec_refpass_mqc_fast_internal(t1, bpno, 64, 64, 66);
+}
+
+/* Clone of opj_t1_dec_refpass_mqc_generic (t1.c:946-951). */
+static void opj_t1_dec_refpass_mqc_fast_generic(
+    opj_t1_t *t1,
+    OPJ_INT32 bpno)
+{
+    opj_t1_dec_refpass_mqc_fast_internal(t1, bpno, t1->w, t1->h, t1->w + 2U);
+}
+
+/* Clone of opj_t1_dec_refpass_mqc dispatch (t1.c:953-962).
+ * Renamed to opj_t1_fast_dec_refpass_mqc and made non-static
+ * (externally linkable public entry point). */
+void opj_t1_fast_dec_refpass_mqc(
+    opj_t1_t *t1,
+    OPJ_INT32 bpno)
+{
+    if (t1->w == 64 && t1->h == 64) {
+        opj_t1_dec_refpass_mqc_fast_64x64(t1, bpno);
+    } else {
+        opj_t1_dec_refpass_mqc_fast_generic(t1, bpno);
+    }
+}
+
 #endif /* !OPJ_T1_LEGACY_ONLY */
