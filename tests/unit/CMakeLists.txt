@@ -32,3 +32,29 @@ target_link_libraries(test_mqc_diff openjp2)
 # Not registered via add_test() — invoked by the shell wrapper.
 add_executable(test_mqc_dump test_mqc_dump.c)
 target_link_libraries(test_mqc_dump openjp2)
+
+# Tiny diff-test subset: 10 files, runs in <30s. Larger sweeps are
+# invoked via scripts/run_diff_test.sh outside ctest.
+set(MQC_DIFF_FAST_CORPUS
+    "${OPJ_DATA_ROOT}/input/conformance/p1_07.j2k"
+    "${OPJ_DATA_ROOT}/input/conformance/p1_01.j2k"
+    "${OPJ_DATA_ROOT}/input/conformance/p0_01.j2k"
+    "${OPJ_DATA_ROOT}/input/conformance/p0_05.j2k"
+    "${OPJ_DATA_ROOT}/input/conformance/p0_09.j2k"
+    "${OPJ_DATA_ROOT}/input/conformance/p0_13.j2k"
+    "${OPJ_DATA_ROOT}/input/conformance/p1_03.j2k"
+    "${OPJ_DATA_ROOT}/input/nonregression/Bretagne2.j2k"
+    "${OPJ_DATA_ROOT}/input/nonregression/buxI.j2k"
+    "${OPJ_DATA_ROOT}/input/nonregression/buxR.j2k"
+)
+add_test(NAME mqc_diff_fast
+         COMMAND ${CMAKE_SOURCE_DIR}/scripts/run_diff_test.sh ${MQC_DIFF_FAST_CORPUS}
+         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+set_tests_properties(mqc_diff_fast PROPERTIES
+    LABELS "diff-test;fast"
+    SKIP_RETURN_CODE 77)
+# Skip if OPJ_DATA_ROOT not set.
+if(NOT OPJ_DATA_ROOT)
+    set_tests_properties(mqc_diff_fast PROPERTIES
+        DISABLED TRUE)
+endif()
