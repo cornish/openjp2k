@@ -14,6 +14,7 @@
  *     variable on first call:
  *       * "0" / "off" / "false" -> legacy
  *       * unset or any other value -> fast (default ON once D1 lands)
+ *       The comparison is case-sensitive; uppercase variants like "OFF" enable fast mode.
  */
 
 #ifdef __cplusplus
@@ -21,7 +22,7 @@ extern "C" {
 #endif
 
 #ifdef OPJ_T1_LEGACY_ONLY
-static inline int opj_t1_fast_enabled(void) { return 0; }
+static INLINE int opj_t1_fast_enabled(void) { return 0; }
 #else
 int opj_t1_fast_enabled(void);
 #endif

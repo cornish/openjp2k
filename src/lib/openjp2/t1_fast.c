@@ -6,10 +6,8 @@
 
 #ifndef OPJ_T1_LEGACY_ONLY
 
-#include <stdlib.h>
-#include <string.h>
-
-static int opj_t1_fast_flag = -1;  /* -1 = uninitialized */
+/* -1 = uninitialized. Concurrent first-callers race benignly: both compute the same value from the env var and write it. */
+static int opj_t1_fast_flag = -1;
 
 int opj_t1_fast_enabled(void)
 {
