@@ -47,6 +47,86 @@ void opj_mqc_fast_resetstates(OPJ_UINT32 *ctxs_idx);
 void opj_mqc_fast_setstate(OPJ_UINT32 *ctxs_idx, OPJ_UINT32 ctxno,
                             OPJ_UINT32 msb, OPJ_INT32 prob);
 
+/*
+ * Fast renormalize. Identical algorithm to the legacy macro for now;
+ * gets replaced with the clz path in D1.2. Bytein remains the legacy
+ * macro: it operates on byte-level state independent of the packed
+ * table.
+ */
+#define opj_mqc_fast_renormd_macro(mqc, a, c, ct) \
+{ \
+    do { \
+        if ((ct) == 0) { \
+            opj_mqc_bytein_macro((mqc), (c), (ct)); \
+        } \
+        (a) <<= 1; \
+        (c) <<= 1; \
+        (ct)--; \
+    } while ((a) < 0x8000); \
+}
+
+/*
+ * Fast decode macro. Reads the packed state entry once into a local,
+ * then derives qeval, mps, transition target, and switch_flag with
+ * shifts and masks rather than pointer dereferences.
+ *
+ *   d        : output bit
+ *   mqc      : opj_mqc_t*
+ *   curidx   : OPJ_UINT32 (mqc->curctx_idx by convention)
+ *   a, c, ct : registers downloaded from mqc
+ */
+#define opj_mqc_fast_decode_macro(d, mqc, curidx, a, c, ct) \
+{ \
+    OPJ_UINT32 _pkd = opj_mqc_states_packed[(curidx)]; \
+    OPJ_UINT32 _qe = OPJ_MQC_PACK_QEVAL(_pkd); \
+    OPJ_UINT32 _mps = OPJ_MQC_PACK_MPS(_pkd); \
+    (a) -= _qe; \
+    if (((c) >> 16) < _qe) { \
+        /* LPS path */ \
+        if ((a) < _qe) { \
+            /* MPS exchange: a = qeval, d = mps, transition NMPS */ \
+            (a) = _qe; \
+            (d) = _mps; \
+            (curidx) = OPJ_MQC_PACK_NMPS_IDX(_pkd); \
+        } else { \
+            (a) = _qe; \
+            (d) = !_mps; \
+            (curidx) = OPJ_MQC_PACK_NLPS_IDX(_pkd); \
+        } \
+        opj_mqc_fast_renormd_macro((mqc), (a), (c), (ct)); \
+    } else { \
+        (c) -= _qe << 16; \
+        if (((a) & 0x8000) == 0) { \
+            /* MPS exchange */ \
+            if ((a) < _qe) { \
+                (d) = !_mps; \
+                (curidx) = OPJ_MQC_PACK_NLPS_IDX(_pkd); \
+            } else { \
+                (d) = _mps; \
+                (curidx) = OPJ_MQC_PACK_NMPS_IDX(_pkd); \
+            } \
+            opj_mqc_fast_renormd_macro((mqc), (a), (c), (ct)); \
+        } else { \
+            (d) = _mps; \
+        } \
+    } \
+}
+
+#define opj_mqc_fast_setcurctx_idx(mqc, ctxno) \
+    ((mqc)->curctx_idx = (mqc)->ctxs_idx[(OPJ_UINT32)(ctxno)])
+
+#define DOWNLOAD_MQC_FAST_VARIABLES(mqc, curidx, a, c, ct) \
+        register OPJ_UINT32 curidx = (mqc)->curctx_idx; \
+        register OPJ_UINT32 c = (mqc)->c; \
+        register OPJ_UINT32 a = (mqc)->a; \
+        register OPJ_UINT32 ct = (mqc)->ct
+
+#define UPLOAD_MQC_FAST_VARIABLES(mqc, curidx, a, c, ct) \
+        (mqc)->curctx_idx = (curidx); \
+        (mqc)->c = (c); \
+        (mqc)->a = (a); \
+        (mqc)->ct = (ct);
+
 #ifdef __cplusplus
 }
 #endif
