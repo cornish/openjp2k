@@ -48,21 +48,26 @@ void opj_mqc_fast_setstate(OPJ_UINT32 *ctxs_idx, OPJ_UINT32 ctxno,
                             OPJ_UINT32 msb, OPJ_INT32 prob);
 
 /*
- * Fast renormalize. Identical algorithm to the legacy macro for now;
- * gets replaced with the clz path in D1.2. Bytein remains the legacy
- * macro: it operates on byte-level state independent of the packed
- * table.
+ * Branchless renormalize: compute the total shift count once via clz,
+ * then consume it in at most two iterations — once with whatever bits
+ * are available before a refill, once after pulling a fresh byte. The
+ * common case (_need <= ct) executes the body exactly once with no
+ * refill, replacing 1-5 single-bit do-while iterations.
  */
 #define opj_mqc_fast_renormd_macro(mqc, a, c, ct) \
 { \
-    do { \
-        if ((ct) == 0) { \
+    OPJ_UINT32 _need = opj_mqc_clz32((a)) - 16u; \
+    while (_need > 0u) { \
+        OPJ_UINT32 _take; \
+        if ((ct) == 0u) { \
             opj_mqc_bytein_macro((mqc), (c), (ct)); \
         } \
-        (a) <<= 1; \
-        (c) <<= 1; \
-        (ct)--; \
-    } while ((a) < 0x8000); \
+        _take = (_need < (ct)) ? _need : (ct); \
+        (a) <<= _take; \
+        (c) <<= _take; \
+        (ct) -= _take; \
+        _need -= _take; \
+    } \
 }
 
 /*
