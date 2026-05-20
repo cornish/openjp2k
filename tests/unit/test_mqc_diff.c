@@ -1,10 +1,23 @@
-/* SPDX-License-Identifier: Apache-2.0 */
-/* Copyright 2026 Toby Cornish */
-/*
- * Diff-test: decode a JP2/J2K file twice, once with the fast MQ path
- * enabled (default) and once forced off via OPJ_T1_FAST=0, and assert
- * byte-exact pixel output. Exits 0 on match, non-zero on mismatch.
- */
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Toby Cornish
+//
+// In-process diff-test driver. Decodes one file with OPJ_T1_FAST=0 set
+// before the first decode and with OPJ_T1_FAST=1 set before the second,
+// then asserts byte-identical opj_image_t output.
+//
+// LIMITATION: opj_t1_fast_enabled() caches its result in a process-
+// global static on first read, so both decodes inside this binary
+// actually use the same path — whichever the first setenv selected.
+// That makes this driver useful only for legacy-vs-legacy regression
+// (catches accidental output drift in the decoder when the env var
+// stays at "0") or fast-vs-fast self-consistency once D1.1 wires the
+// fast path. True A/B comparison between legacy and fast requires the
+// subprocess wrapper in scripts/run_diff_test.sh (Task 3), which
+// invokes a sibling helper test_mqc_dump once per env-var value in
+// fresh processes.
+//
+// Exit codes: 0=match, 1=pixel mismatch, 2=bad args, 3=legacy decode
+// failure, 4=fast decode failure.
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -35,6 +48,10 @@ static opj_image_t *decode_file(const char *path)
         fmt = OPJ_CODEC_JP2;
     }
     codec = opj_create_decompress(fmt);
+    if (!codec) {
+        opj_stream_destroy(stream);
+        return NULL;
+    }
     if (!opj_setup_decoder(codec, &parameters)) {
         opj_destroy_codec(codec);
         opj_stream_destroy(stream);
@@ -100,7 +117,7 @@ int main(int argc, char **argv)
     int rc;
 
     if (argc != 2) {
-        fprintf(stderr, "usage: %s <file.jp2|file.j2k>\n", argv[0]);
+        fprintf(stderr, "usage: %s <input-file>\n", argv[0]);
         return 2;
     }
     path = argv[1];
