@@ -11,6 +11,8 @@
 //   for each component:
 //     uint32 w, uint32 h, int32 prec, int32 sgnd
 //     (w*h) int32 samples in component-buffer order
+//     (samples are written in host byte order; this dump format is
+//     intended for cmp-style same-machine comparison only)
 
 #include <stdio.h>
 #include <stdlib.h>

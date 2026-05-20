@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Decode one or more files via legacy and fast paths in separate
-# processes and assert byte-identical output. Exits non-zero on first
-# mismatch, listing which files differed.
+# processes and assert byte-identical output. Runs every input through
+# both code paths, reports per-file pass/fail, and exits non-zero at
+# the end if any file failed (does not stop at the first mismatch).
 #
 # Usage:
 #   scripts/run_diff_test.sh <file> [file ...]
@@ -22,7 +23,7 @@ fi
 files=()
 if [ "${1:-}" = "--include-from" ]; then
     shift
-    while IFS= read -r line; do
+    while IFS= read -r line || [ -n "$line" ]; do
         [ -z "$line" ] && continue
         case "$line" in '#'*) continue;; esac
         files+=("$line")
