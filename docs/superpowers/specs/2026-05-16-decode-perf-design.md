@@ -145,6 +145,8 @@ the inner loop.
 
 *(Status 2026-05-20: D1.2 (clz-driven renormalize) landed. Smoke-corpus gmean openjp2k_fast/openjp2k_legacy: 0.9482. Per-file range [0.8563, 1.1940]. D1 net effect vs pre-D1.1 legacy: -5.18% (gmean 0.9482). D1.2 gain over D1.1: -0.12% (essentially noise; 0.9482 vs 0.9494). BSR instructions confirmed present in disassembly (clz path compiled and inlined). D1.2 did not overcome D1.1's structural overhead — the ~5% indirection penalty persists. Root cause: the do-while renormalize loop is not the bottleneck; the packed-state LUT indirection dominates. Next: diagnose whether D1.1's indirection overhead can be reduced before continuing to D2, or proceed to D2 and treat D1 fast-path as break-even at current workload mix.)*
 
+*(D1 worst-loser diff-test 2026-05-20: 30 files from the prior full-corpus worst-ratio tail (incl. p1_07.j2k, conformance + nonregression edge cases) all byte-identical legacy vs fast.)*
+
 **D2 — Pass-dispatch despecialization.**
 Today the SP/MR/CU passes are reached via function-pointer dispatch
 parameterized by codeblock style. Generate compile-time-specialized variants
