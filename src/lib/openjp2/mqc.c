@@ -475,13 +475,16 @@ void opj_mqc_resetstates(opj_mqc_t *mqc)
     OPJ_UINT32 i;
     for (i = 0; i < MQC_NUMCTXS; i++) {
         mqc->ctxs[i] = mqc_states;
+        mqc->ctxs_idx[i] = 0;
     }
+    mqc->curctx_idx = &mqc->ctxs_idx[0];
 }
 
 void opj_mqc_setstate(opj_mqc_t *mqc, OPJ_UINT32 ctxno, OPJ_UINT32 msb,
                       OPJ_INT32 prob)
 {
     mqc->ctxs[ctxno] = &mqc_states[msb + (OPJ_UINT32)(prob << 1)];
+    mqc->ctxs_idx[ctxno] = msb + (OPJ_UINT32)(prob << 1);
 }
 
 void opj_mqc_byteout(opj_mqc_t *mqc)

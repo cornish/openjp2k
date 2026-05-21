@@ -139,6 +139,18 @@ shift. Pack `(Qe, NMPS, NLPS, switch_flag)` into one 32-bit entry per state so
 a decode step touches one cache line. Keep MQ state register-resident through
 the inner loop.
 
+*(Status 2026-05-19: D1.0 (verification harness) landed. opj_t1_fast_enabled() runtime switch + test_mqc_dump dumper + scripts/run_diff_test.sh subprocess wrapper provide byte-exact A/B diffing. Gated in ctest as `mqc_diff_fast` (10 conformance files, <30s). Diff-test runs 0-failed against smoke corpus (synthetic-iter, 90 files), conformance/nonregression subset, and OPJ_T1_LEGACY_ONLY build is clean. D1.1 (packed-state LUT) next.)*
+
+*(Status 2026-05-20: D1.1 (packed-state LUT) landed. Diff-test passes on smoke (90 files) and full conformance (no new failures vs 8 pre-existing). Bench smoke gmean openjp2k_fast/openjp2k_legacy: 0.9494. Per-file range [0.9088, 1.0134]; 0 files below 0.85 (target: 0). The ~5% overhead is attributable to structural indirection cost before D1.2's clz renormalize loop eliminates the do-while. D1.2 (clz renormalize) next.)*
+
+*(Status 2026-05-20: D1.2 (clz-driven renormalize) landed. Smoke-corpus gmean openjp2k_fast/openjp2k_legacy: 0.9482. Per-file range [0.8563, 1.1940]. D1 net effect vs pre-D1.1 legacy: -5.18% (gmean 0.9482). D1.2 gain over D1.1: -0.12% (essentially noise; 0.9482 vs 0.9494). BSR instructions confirmed present in disassembly (clz path compiled and inlined). D1.2 did not overcome D1.1's structural overhead — the ~5% indirection penalty persists. Root cause: the do-while renormalize loop is not the bottleneck; the packed-state LUT indirection dominates. Next: diagnose whether D1.1's indirection overhead can be reduced before continuing to D2, or proceed to D2 and treat D1 fast-path as break-even at current workload mix.)*
+
+*(D1 worst-loser diff-test 2026-05-20: 30 files from the prior full-corpus worst-ratio tail (incl. p1_07.j2k, conformance + nonregression edge cases) all byte-identical legacy vs fast.)*
+
+*(D1.3 GOT-indirection fix 2026-05-21 (commit `f5978a62`): the 5% drag identified in D1.2 was traced to `opj_mqc_states_packed` being default-visibility, forcing a per-decode GOT load in the inner loop. Declared `OPJ_LOCAL`, plumbed the table base as a register-local `pktbl` through the decode macro via `DOWNLOAD_MQC_FAST_VARIABLES`, eliminating the GOT load. New smoke-corpus gmean openjp2k_fast/openjp2k_legacy: 1.0045 (parity, within noise; was 0.9482). p1_07.j2k decode-stage: 35.46µs → 34.70µs.)*
+
+*(D1 deliverable 2026-05-21 (tag `v0.4.0-d1-mq-tightening`): iter-corpus gmean openjp2k/openjpeg = 0.9833 (308 files, fast default-on) vs pre-D1 baseline of 0.986 — essentially unchanged. Per-bucket: pub/conformance 1.0032, pub/wsi-tiles 0.9904, synth/mono16_1024 0.9329 (worst), synth/rgb8_1024 0.9758. Internal fast-vs-legacy 1.0045. Reading: D1 ships as correctness + harness + parity infrastructure; the per-decode hot path is no longer the bottleneck on this corpus. Further perf gains expected from D2 (pass-dispatch despecialization) and ROI early-exit on top of the fast-path scaffolding.)*
+
 **D2 — Pass-dispatch despecialization.**
 Today the SP/MR/CU passes are reached via function-pointer dispatch
 parameterized by codeblock style. Generate compile-time-specialized variants
