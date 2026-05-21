@@ -147,6 +147,10 @@ the inner loop.
 
 *(D1 worst-loser diff-test 2026-05-20: 30 files from the prior full-corpus worst-ratio tail (incl. p1_07.j2k, conformance + nonregression edge cases) all byte-identical legacy vs fast.)*
 
+*(D1.3 GOT-indirection fix 2026-05-21 (commit `f5978a62`): the 5% drag identified in D1.2 was traced to `opj_mqc_states_packed` being default-visibility, forcing a per-decode GOT load in the inner loop. Declared `OPJ_LOCAL`, plumbed the table base as a register-local `pktbl` through the decode macro via `DOWNLOAD_MQC_FAST_VARIABLES`, eliminating the GOT load. New smoke-corpus gmean openjp2k_fast/openjp2k_legacy: 1.0045 (parity, within noise; was 0.9482). p1_07.j2k decode-stage: 35.46µs → 34.70µs.)*
+
+*(D1 deliverable 2026-05-21 (tag `v0.4.0-d1-mq-tightening`): iter-corpus gmean openjp2k/openjpeg = 0.9833 (308 files, fast default-on) vs pre-D1 baseline of 0.986 — essentially unchanged. Per-bucket: pub/conformance 1.0032, pub/wsi-tiles 0.9904, synth/mono16_1024 0.9329 (worst), synth/rgb8_1024 0.9758. Internal fast-vs-legacy 1.0045. Reading: D1 ships as correctness + harness + parity infrastructure; the per-decode hot path is no longer the bottleneck on this corpus. Further perf gains expected from D2 (pass-dispatch despecialization) and ROI early-exit on top of the fast-path scaffolding.)*
+
 **D2 — Pass-dispatch despecialization.**
 Today the SP/MR/CU passes are reached via function-pointer dispatch
 parameterized by codeblock style. Generate compile-time-specialized variants
