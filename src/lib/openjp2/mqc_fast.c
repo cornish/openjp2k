@@ -20,7 +20,7 @@
      ((OPJ_UINT32)((nmps) & 0x7Fu) << 18) |       \
      ((OPJ_UINT32)((nlps) & 0x7Fu) << 25))
 
-const OPJ_UINT32 opj_mqc_states_packed[OPJ_MQC_FAST_NUM_STATES] = {
+OPJ_LOCAL const OPJ_UINT32 opj_mqc_states_packed[OPJ_MQC_FAST_NUM_STATES] = {
     /*  0 */ PACK(0x5601, 0,  2,  3, 1),
     /*  1 */ PACK(0x5601, 1,  3,  2, 1),
     /*  2 */ PACK(0x3401, 0,  4, 12, 0),
@@ -116,6 +116,11 @@ const OPJ_UINT32 opj_mqc_states_packed[OPJ_MQC_FAST_NUM_STATES] = {
     /* 92 */ PACK(0x5601, 0, 92, 92, 0),
     /* 93 */ PACK(0x5601, 1, 93, 93, 0)
 };
+
+OPJ_UINT32 opj_mqc_fast_get_packed_entry(OPJ_UINT32 idx)
+{
+    return opj_mqc_states_packed[idx];
+}
 
 void opj_mqc_fast_resetstates(OPJ_UINT32 *ctxs_idx)
 {

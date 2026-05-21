@@ -27,7 +27,22 @@ extern "C" {
  */
 #define OPJ_MQC_FAST_NUM_STATES 94
 
-extern const OPJ_UINT32 opj_mqc_states_packed[OPJ_MQC_FAST_NUM_STATES];
+/*
+ * OPJ_LOCAL marks the table as a hidden symbol so the compiler can reference
+ * it via a direct RIP-relative address rather than a GOT indirection. Without
+ * this the compiler reloads the GOT entry on every packed-state access inside
+ * the hot decode loop, costing one extra memory load per decode call.
+ *
+ * Tests that need to inspect the table must call opj_mqc_fast_get_packed_entry()
+ * rather than accessing the array directly.
+ */
+OPJ_LOCAL extern const OPJ_UINT32 opj_mqc_states_packed[OPJ_MQC_FAST_NUM_STATES];
+
+/*
+ * Exported accessor used by unit tests to verify the packed table without
+ * requiring the symbol itself to be exported.
+ */
+OPJ_API OPJ_UINT32 opj_mqc_fast_get_packed_entry(OPJ_UINT32 idx);
 
 /* Field accessors (compile-time constant when applied to a packed value). */
 #define OPJ_MQC_PACK_QEVAL(p)       ((p) & 0xFFFFu)
@@ -79,10 +94,15 @@ void opj_mqc_fast_setstate(OPJ_UINT32 *ctxs_idx, OPJ_UINT32 ctxno,
  *   mqc      : opj_mqc_t*
  *   curidx   : OPJ_UINT32 * (pointer to active slot in mqc->ctxs_idx[])
  *   a, c, ct : registers downloaded from mqc
+ *   pktbl    : const OPJ_UINT32 * — pre-loaded base of opj_mqc_states_packed[].
+ *              Pass the pktbl local declared by DOWNLOAD_MQC_FAST_VARIABLES.
+ *              Keeping this as a caller-supplied pointer allows the compiler
+ *              to hoist the table-base load out of the per-symbol decode loop,
+ *              avoiding a GOT reload on every macro expansion.
  */
-#define opj_mqc_fast_decode_macro(d, mqc, curidx, a, c, ct) \
+#define opj_mqc_fast_decode_macro(d, mqc, curidx, a, c, ct, pktbl) \
 { \
-    OPJ_UINT32 _pkd = opj_mqc_states_packed[*(curidx)]; \
+    OPJ_UINT32 _pkd = (pktbl)[*(curidx)]; \
     OPJ_UINT32 _qe = OPJ_MQC_PACK_QEVAL(_pkd); \
     OPJ_UINT32 _mps = OPJ_MQC_PACK_MPS(_pkd); \
     (a) -= _qe; \
@@ -124,7 +144,8 @@ void opj_mqc_fast_setstate(OPJ_UINT32 *ctxs_idx, OPJ_UINT32 ctxno,
         register OPJ_UINT32 *curidx = (mqc)->curctx_idx; \
         register OPJ_UINT32 c = (mqc)->c; \
         register OPJ_UINT32 a = (mqc)->a; \
-        register OPJ_UINT32 ct = (mqc)->ct
+        register OPJ_UINT32 ct = (mqc)->ct; \
+        const OPJ_UINT32 * const pktbl = opj_mqc_states_packed
 
 #define UPLOAD_MQC_FAST_VARIABLES(mqc, curidx, a, c, ct) \
         (mqc)->curctx_idx = (curidx); \

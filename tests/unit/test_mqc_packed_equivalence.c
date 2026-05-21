@@ -39,7 +39,7 @@ int main(void)
     OPJ_UINT32 o;
 
     for (i = 0; i < OPJ_MQC_FAST_NUM_STATES; ++i) {
-        p = opj_mqc_states_packed[i];
+        p = opj_mqc_fast_get_packed_entry(i);
         mps = OPJ_MQC_PACK_MPS(p);
         swf = OPJ_MQC_PACK_SWITCH(p);
         nmps = OPJ_MQC_PACK_NMPS_IDX(p);
@@ -49,7 +49,7 @@ int main(void)
         failed += check_index_range(i, "nlps", nlps);
         if (failed) continue;  /* skip further checks if indices are bogus */
 
-        nlps_mps = OPJ_MQC_PACK_MPS(opj_mqc_states_packed[nlps]);
+        nlps_mps = OPJ_MQC_PACK_MPS(opj_mqc_fast_get_packed_entry(nlps));
         actual_switch = (mps != nlps_mps) ? 1u : 0u;
         if (actual_switch != swf) {
             fprintf(stderr,
@@ -63,8 +63,8 @@ int main(void)
     /* Even/odd mirror check: state 2k has mps=0, state 2k+1 has mps=1,
      * and their (nmps,nlps) are swapped. */
     for (i = 0; i < OPJ_MQC_FAST_NUM_STATES; i += 2) {
-        e = opj_mqc_states_packed[i];
-        o = opj_mqc_states_packed[i + 1];
+        e = opj_mqc_fast_get_packed_entry(i);
+        o = opj_mqc_fast_get_packed_entry(i + 1);
         if (OPJ_MQC_PACK_QEVAL(e) != OPJ_MQC_PACK_QEVAL(o)) {
             fprintf(stderr, "states %u/%u qeval mismatch\n", i, i+1); failed++;
         }

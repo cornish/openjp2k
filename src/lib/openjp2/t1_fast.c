@@ -38,7 +38,7 @@ int opj_t1_fast_enabled(void)
  * with the following substitutions:
  *
  *   opj_mqc_decode_macro(v, mqc, curctx, a, c, ct)
- *       -> opj_mqc_fast_decode_macro(v, mqc, curidx, a, c, ct)
+ *       -> opj_mqc_fast_decode_macro(v, mqc, curidx, a, c, ct, pktbl)
  *   opj_t1_setcurctx(curctx, X)
  *       -> opj_t1_setcurctx_fast(curidx, X)
  *   DOWNLOAD_MQC_VARIABLES(mqc, curctx, a, c, ct)
@@ -64,7 +64,7 @@ int opj_t1_fast_enabled(void)
         (flags & (T1_SIGMA_NEIGHBOURS << (ci * 3U))) != 0U) { \
         OPJ_UINT32 ctxt1 = opj_t1_getctxno_zc(mqc, flags >> (ci * 3U)); \
         opj_t1_setcurctx_fast(curidx, ctxt1); \
-        opj_mqc_fast_decode_macro(v, mqc, curidx, a, c, ct); \
+        opj_mqc_fast_decode_macro(v, mqc, curidx, a, c, ct, pktbl); \
         if (v) { \
             OPJ_UINT32 lu = opj_t1_getctxtno_sc_or_spb_index( \
                                 flags, \
@@ -73,7 +73,7 @@ int opj_t1_fast_enabled(void)
             OPJ_UINT32 ctxt2 = opj_t1_getctxno_sc(lu); \
             OPJ_UINT32 spb = opj_t1_getspb(lu); \
             opj_t1_setcurctx_fast(curidx, ctxt2); \
-            opj_mqc_fast_decode_macro(v, mqc, curidx, a, c, ct); \
+            opj_mqc_fast_decode_macro(v, mqc, curidx, a, c, ct, pktbl); \
             v = v ^ spb; \
             data[ci*data_stride] = v ? -oneplushalf : oneplushalf; \
             opj_t1_update_flags_macro(flags, flagsp, ci, v, flags_stride, vsc); \
@@ -93,6 +93,7 @@ static INLINE void opj_t1_dec_sigpass_step_mqc_fast(
     OPJ_UINT32 vsc)
 {
     OPJ_UINT32 v;
+    const OPJ_UINT32 * const pktbl = opj_mqc_states_packed;
 
     opj_mqc_t *mqc = &(t1->mqc);       /* MQC component */
     opj_t1_dec_sigpass_step_mqc_fast_macro(*flagsp, flagsp, flags_stride, datap,
@@ -210,7 +211,7 @@ void opj_t1_fast_dec_sigpass_mqc(
  * with the same substitutions as sigpass:
  *
  *   opj_mqc_decode_macro(v, mqc, curctx, a, c, ct)
- *       -> opj_mqc_fast_decode_macro(v, mqc, curidx, a, c, ct)
+ *       -> opj_mqc_fast_decode_macro(v, mqc, curidx, a, c, ct, pktbl)
  *   opj_t1_setcurctx(curctx, X)
  *       -> opj_t1_setcurctx_fast(curidx, X)
  *   DOWNLOAD_MQC_VARIABLES(mqc, curctx, a, c, ct)
@@ -229,7 +230,7 @@ void opj_t1_fast_dec_sigpass_mqc(
             (T1_SIGMA_THIS << (ci * 3U))) { \
         OPJ_UINT32 ctxt = opj_t1_getctxno_mag(flags >> (ci * 3U)); \
         opj_t1_setcurctx_fast(curidx, ctxt); \
-        opj_mqc_fast_decode_macro(v, mqc, curidx, a, c, ct); \
+        opj_mqc_fast_decode_macro(v, mqc, curidx, a, c, ct, pktbl); \
         data[ci*data_stride] += (v ^ (data[ci*data_stride] < 0)) ? poshalf : -poshalf; \
         flags |= T1_MU_THIS << (ci * 3U); \
     } \
@@ -244,6 +245,7 @@ static INLINE void opj_t1_dec_refpass_step_mqc_fast(
     OPJ_UINT32 ci)
 {
     OPJ_UINT32 v;
+    const OPJ_UINT32 * const pktbl = opj_mqc_states_packed;
 
     opj_mqc_t *mqc = &(t1->mqc);       /* MQC component */
     opj_t1_dec_refpass_step_mqc_fast_macro(*flagsp, datap, 0, ci,
@@ -332,7 +334,7 @@ void opj_t1_fast_dec_refpass_mqc(
  * with the same substitutions as sigpass/refpass:
  *
  *   opj_mqc_decode_macro(v, mqc, curctx, a, c, ct)
- *       -> opj_mqc_fast_decode_macro(v, mqc, curidx, a, c, ct)
+ *       -> opj_mqc_fast_decode_macro(v, mqc, curidx, a, c, ct, pktbl)
  *   opj_t1_setcurctx(curctx, X)
  *       -> opj_t1_setcurctx_fast(curidx, X)
  *   DOWNLOAD_MQC_VARIABLES(mqc, curctx, a, c, ct)
@@ -362,7 +364,7 @@ void opj_t1_fast_dec_refpass_mqc(
             if( !partial ) { \
                 OPJ_UINT32 ctxt1 = opj_t1_getctxno_zc(mqc, flags >> (ci * 3U)); \
                 opj_t1_setcurctx_fast(curidx, ctxt1); \
-                opj_mqc_fast_decode_macro(v, mqc, curidx, a, c, ct); \
+                opj_mqc_fast_decode_macro(v, mqc, curidx, a, c, ct, pktbl); \
                 if( !v ) \
                     break; \
             } \
@@ -371,7 +373,7 @@ void opj_t1_fast_dec_refpass_mqc(
                                     flags, flagsp[-1], flagsp[1], \
                                     ci); \
                 opj_t1_setcurctx_fast(curidx, opj_t1_getctxno_sc(lu)); \
-                opj_mqc_fast_decode_macro(v, mqc, curidx, a, c, ct); \
+                opj_mqc_fast_decode_macro(v, mqc, curidx, a, c, ct, pktbl); \
                 v = v ^ opj_t1_getspb(lu); \
                 data[ci*data_stride] = v ? -oneplushalf : oneplushalf; \
                 opj_t1_update_flags_macro(flags, flagsp, ci, v, flags_stride, vsc); \
@@ -390,6 +392,7 @@ static void opj_t1_dec_clnpass_step_fast(
     OPJ_UINT32 vsc)
 {
     OPJ_UINT32 v;
+    const OPJ_UINT32 * const pktbl = opj_mqc_states_packed;
 
     opj_mqc_t *mqc = &(t1->mqc);   /* MQC component */
     opj_t1_dec_clnpass_step_fast_macro(OPJ_TRUE, OPJ_FALSE,
@@ -419,13 +422,13 @@ static void opj_t1_dec_clnpass_step_fast(
             if (flags == 0) { \
                 OPJ_UINT32 partial = OPJ_TRUE; \
                 opj_t1_setcurctx_fast(curidx, T1_CTXNO_AGG); \
-                opj_mqc_fast_decode_macro(v, mqc, curidx, a, c, ct); \
+                opj_mqc_fast_decode_macro(v, mqc, curidx, a, c, ct, pktbl); \
                 if (!v) { \
                     continue; \
                 } \
                 opj_t1_setcurctx_fast(curidx, T1_CTXNO_UNI); \
-                opj_mqc_fast_decode_macro(runlen, mqc, curidx, a, c, ct); \
-                opj_mqc_fast_decode_macro(v, mqc, curidx, a, c, ct); \
+                opj_mqc_fast_decode_macro(runlen, mqc, curidx, a, c, ct, pktbl); \
+                opj_mqc_fast_decode_macro(v, mqc, curidx, a, c, ct, pktbl); \
                 runlen = (runlen << 1) | v; \
                 switch(runlen) { \
                     case 0: \
