@@ -24,6 +24,21 @@
 #include <string.h>
 #include "openjpeg.h"
 
+/* Portability shim: setenv() is POSIX, not Windows. MSVC ships
+ * _putenv_s; mingw has both. Wrap so the rest of the file reads the
+ * same on all platforms. */
+#if defined(_WIN32) && !defined(__MINGW32__)
+static int t1_setenv(const char *name, const char *value)
+{
+    return _putenv_s(name, value);
+}
+#else
+static int t1_setenv(const char *name, const char *value)
+{
+    return setenv(name, value, 1);
+}
+#endif
+
 static opj_image_t *decode_file(const char *path)
 {
     opj_dparameters_t parameters;
@@ -122,14 +137,14 @@ int main(int argc, char **argv)
     }
     path = argv[1];
 
-    setenv("OPJ_T1_FAST", "0", 1);
+    t1_setenv("OPJ_T1_FAST", "0");
     legacy = decode_file(path);
     if (!legacy) {
         fprintf(stderr, "legacy decode failed: %s\n", path);
         return 3;
     }
 
-    setenv("OPJ_T1_FAST", "1", 1);
+    t1_setenv("OPJ_T1_FAST", "1");
     fast = decode_file(path);
     if (!fast) {
         fprintf(stderr, "fast decode failed: %s\n", path);
