@@ -10380,6 +10380,9 @@ static OPJ_BOOL opj_j2k_update_image_data(opj_tcd_t * p_tcd,
             if (p_tcd->whole_tile_decoding) {
                 l_img_comp_dest->data = l_tilec->data;
                 l_tilec->data = NULL;
+                /* Pool-aware destroy keys on slot->lent — leave the slot
+                 * marked lent so the destroy walker knows this buffer was
+                 * transferred and skips the free. */
             } else {
                 l_img_comp_dest->data = l_tilec->data_win;
                 l_tilec->data_win = NULL;
