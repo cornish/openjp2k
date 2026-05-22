@@ -191,3 +191,49 @@ Per-deliverable gate:
 
 Bench gate after implementation. If smoke gmean ≥ 1.00 → tag and merge.
 If gmean < 1.00 → revert, report, escalate to user for next direction.
+
+---
+
+## Outcome (2026-05-22): reverted
+
+Implementation landed on `feat/d3-zc-fusion` (commit `67b9b5ac`) per the
+plan at [`docs/superpowers/plans/2026-05-21-d3-zc-fusion.md`](../plans/2026-05-21-d3-zc-fusion.md).
+Correctness held — 90/90 smoke + 30/30 worst-loser byte-identical, 8
+pre-existing conformance failures unchanged. **Perf gate failed:**
+smoke gmean openjp2k_fast/openjp2k_legacy = **0.9933** (Pre-D3 D1 baseline
+was 1.0045 — D3 made things 1.1% worse). WSI 1024×1024 subset showed a
+small win (+0.46%), so the effect was workload-dependent, not a clean
+regression.
+
+Disassembly diff (`opj_t1_dec_sigpass_mqc_fast_64x64_novsc`):
+
+| | D1 | D3 |
+|---|---|---|
+| instructions | 1238 | 1283 (+3.6%) |
+| `opj_mqc_states_packed` refs | 8 | 32 |
+| `lea` ops | 32 | 56 |
+
+The 24 extra references come from 4 inlined step-macro instances × 4
+transition writeback sites, each emitting its own `lea base-of-pktbl`
+because the compiler couldn't keep one register pinned across the
+inlined writebacks. Each writeback site issues `pktbl[next_idx]` to
+resolve the next packed state — work the read path saved is added back
+on every transition. Pure-MPS-heavy workloads (WSI) win slightly;
+transition-heavy workloads (synthetic mono16 lossless) lose more.
+
+**Why "Option C" (pre-resolve NMPS/NLPS inline) doesn't help:** the MQ
+state machine is recursive — to make transition O(1) without a LUT,
+each slot would need to contain the full state graph reachable from
+it. The only finite encoding of that is a pointer to the next state,
+which **is exactly what the legacy decoder already does** (`*curctx =
+(*curctx)->nmps` writes a pointer; `(*curctx)->qeval` reads through it).
+D3's packed-index approach is structurally inferior to the legacy
+pointer dispatch on the transition path, and the inlining-cost trade
+overwhelmed the read-path savings.
+
+Reverted by abandoning `feat/d3-zc-fusion`. Branch preserved for
+historical reference; not merged. Pivoting to **D6.1 (TCD buffer-pool)**
+which the D2 profile identified as 11.71% on archival workloads — a
+different optimization class (allocator pressure, not inner-loop
+arithmetic), where the D1/D3 "compiler-already-good" pattern doesn't
+apply.
