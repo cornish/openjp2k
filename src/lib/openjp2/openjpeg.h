@@ -111,6 +111,13 @@ defined with this macro as being exported.
 #   else
 #       define OPJ_API __declspec(dllimport)
 #   endif /* OPJ_EXPORTS */
+/* OPJ_LOCAL is a hidden-visibility marker used on ELF platforms to
+ * avoid GOT indirection on hot-path data symbols (see mqc_fast.h's
+ * opj_mqc_states_packed). On Windows PE the equivalent is simply not
+ * exporting from the DLL, which the absence of __declspec(dllexport)
+ * already provides; define OPJ_LOCAL as a no-op here so the
+ * declaration parses on all platforms. */
+#   define OPJ_LOCAL
 #endif /* !OPJ_STATIC || !_WIN32 */
 
 typedef int OPJ_BOOL;
