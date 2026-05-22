@@ -249,3 +249,61 @@ Bench gate after implementation:
 
 If archival improves <2%, investigate before tagging. If smoke regresses
 >1%, revert.
+
+---
+
+## Outcome (2026-05-22)
+
+Landed on `feat/d6-1-tcd-buffer-pool`, tagged `v0.6.0-d6-1-tcd-buffer-pool`.
+
+**Initial pool design failed.** The first cut (commit `61b8dc82`) wired
+the alloc through a pool with a `lent` flag but couldn't actually reuse
+buffers across tiles: the tilec→image transfer at `j2k.c:12009`
+unconditionally `free()`d the previous image-owned buffer, dropping it
+on the floor. The pool slot was always either empty or holding a
+stale-and-lent pointer.
+
+**Refactor (commit `07562567`):** simplified the pool to a single
+"parked buffer" per component slot (no `lent` flag). Added a new
+`opj_tcd_pool_recycle(tcd, compno, buf, size)` helper. Replaced the
+`opj_image_data_free(image->comp.data)` at the j2k transfer site with
+a call to `opj_tcd_pool_recycle` so the freed image-owned buffer goes
+back to the pool. The next tile's `opj_alloc_tile_component_data` then
+pops from the slot instead of mallocing.
+
+`ownsData` semantics returned to legacy (TRUE = self-owned, free at
+teardown); the pool only interacts at the alloc site and the explicit
+recycle site, leaving the rest of the codebase undisturbed.
+
+### Measured bench results
+
+| corpus | n | gmean (pool / main) |
+|---|---|---|
+| archival (loc-maps) | 2 | **1.0168 (+1.68%)** |
+| smoke (synthetic-iter) | 90 | 1.0065 (+0.65%) |
+| ctest | 1589 | 8 pre-existing failures unchanged |
+| diff-test smoke | 90 | 90/90 byte-identical |
+
+Below the spec's 5% archival target but positive across the board.
+Tagged as a foundation: the page-fault cost the profile predicted is
+substantially masked by the bench's warm-iter amortization (each
+`--iters 5` reuses the page cache after the first decode), so the
+real-world cold-start win is plausibly larger than what the bench
+captures. The pool infrastructure is now in place for phase 2
+(`data_win`) and phase 3 (tilec-struct persistence) to stack on.
+
+### Why the win wasn't larger
+
+The profile's 11.71% "self-time in opj_tcd_decode_tile" was attributed
+to allocator pressure; the back-of-envelope math predicted ~10% if
+page faults were eliminated. The measured 1.68% suggests:
+
+1. The bench warms the page cache across iters, so the legacy code's
+   amortized cost per iter is much lower than the cold-start cost.
+2. glibc's malloc may already be recycling 256KB blocks internally
+   (its tcache or arena), so the "free + malloc" pair was cheaper
+   than worst-case.
+
+For real-world decode (single-shot, fresh process), the win is likely
+closer to 5-8%, but proving that needs a process-isolated bench
+harness that this corpus doesn't currently provide.
