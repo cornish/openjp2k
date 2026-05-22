@@ -191,6 +191,24 @@ typedef struct opj_tcd_resolution {
     OPJ_UINT32 win_y1;
 } opj_tcd_resolution_t;
 
+/* D6.1: per-component pool slot for the tile-component data buffer.
+ * The pool lives on opj_tcd_t and survives individual tile decodes,
+ * so the first malloc per component is amortized across the whole
+ * image's tiles. */
+typedef struct opj_tcd_pool_slot {
+    OPJ_INT32 *buf;        /* pooled buffer (NULL if slot empty)             */
+    OPJ_SIZE_T size;       /* allocated size of buf in bytes (0 if NULL)     */
+    OPJ_BOOL   lent;       /* TRUE while a tilec currently holds this buffer */
+} opj_tcd_pool_slot_t;
+
+typedef struct opj_tcd_buffer_pool {
+    opj_tcd_pool_slot_t *slots;  /* numcomps slots; NULL until pool inited   */
+    OPJ_UINT32 numcomps;         /* matches image->numcomps when initialized */
+} opj_tcd_buffer_pool_t;
+
+/* Forward declaration so opj_tcd_tilecomp_t can hold a back-pointer. */
+struct opj_tcd;
+
 /** Tile-component structure */
 typedef struct opj_tcd_tilecomp {
     /* dimension of component : left upper corner (x0, y0) right low corner (x1,y1) */
@@ -225,6 +243,11 @@ typedef struct opj_tcd_tilecomp {
 
     /* number of pixels */
     OPJ_SIZE_T numpix;
+
+    /* D6.1: back-pointers used by opj_alloc_tile_component_data to
+     * reach the parent TCD's data_pool. Set once in opj_tcd_init_tile. */
+    OPJ_UINT32 comp_no;
+    struct opj_tcd *parent_tcd;
 } opj_tcd_tilecomp_t;
 
 
@@ -288,6 +311,11 @@ typedef struct opj_tcd {
     OPJ_BOOL   whole_tile_decoding;
     /* Array of size image->numcomps indicating if a component must be decoded. NULL if all components must be decoded */
     OPJ_BOOL* used_component;
+
+    /* D6.1: per-component tile-component buffer pool. Lifetime is tied
+     * to this TCD; reset to all-NULL slots at opj_tcd_init, populated
+     * lazily by opj_alloc_tile_component_data, freed at opj_tcd_destroy. */
+    opj_tcd_buffer_pool_t data_pool;
 } opj_tcd_t;
 
 /**
