@@ -193,12 +193,13 @@ typedef struct opj_tcd_resolution {
 
 /* D6.1: per-component pool slot for the tile-component data buffer.
  * The pool lives on opj_tcd_t and survives individual tile decodes,
- * so the first malloc per component is amortized across the whole
- * image's tiles. */
+ * so buffers freed at one tile's transfer-to-image are reused by the
+ * next tile's allocation instead of round-tripping through the
+ * system allocator (which page-faults on first touch of fresh 256KB
+ * blocks). Each slot holds at most one free buffer at a time. */
 typedef struct opj_tcd_pool_slot {
-    OPJ_INT32 *buf;        /* pooled buffer (NULL if slot empty)             */
-    OPJ_SIZE_T size;       /* allocated size of buf in bytes (0 if NULL)     */
-    OPJ_BOOL   lent;       /* TRUE while a tilec currently holds this buffer */
+    OPJ_INT32 *buf;        /* available buffer (NULL if slot empty)      */
+    OPJ_SIZE_T size;       /* allocated size of buf in bytes (0 if NULL) */
 } opj_tcd_pool_slot_t;
 
 typedef struct opj_tcd_buffer_pool {
@@ -498,6 +499,21 @@ OPJ_BOOL opj_tcd_copy_tile_data(opj_tcd_t *p_tcd,
  *
  */
 OPJ_BOOL opj_alloc_tile_component_data(opj_tcd_tilecomp_t *l_tilec);
+
+/* D6.1: pool-aware free for buffers that were handed out via the
+ * tile-component pool (most commonly via opj_alloc_tile_component_data).
+ * Callers that previously did opj_image_data_free(image->comp.data) at
+ * a tilec-to-image transfer site should call this instead so the
+ * buffer can be reused by the next tile's allocation.
+ *
+ * If the pool slot for `compno` is empty, the buffer is parked there
+ * for reuse. If the slot already holds an equal-or-larger buffer, the
+ * incoming buffer is freed (only one buffer is parked per slot). If
+ * the slot holds a smaller buffer, the smaller one is freed and the
+ * incoming buffer replaces it. NULL ptr is a no-op (matches
+ * opj_image_data_free's behaviour). */
+void opj_tcd_pool_recycle(opj_tcd_t *tcd, OPJ_UINT32 compno,
+                          OPJ_INT32 *buf, OPJ_SIZE_T size);
 
 /** Returns whether a sub-band is empty (i.e. whether it has a null area)
  * @param band Sub-band handle.

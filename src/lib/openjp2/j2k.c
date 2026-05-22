@@ -10380,9 +10380,6 @@ static OPJ_BOOL opj_j2k_update_image_data(opj_tcd_t * p_tcd,
             if (p_tcd->whole_tile_decoding) {
                 l_img_comp_dest->data = l_tilec->data;
                 l_tilec->data = NULL;
-                /* Pool-aware destroy keys on slot->lent — leave the slot
-                 * marked lent so the destroy walker knows this buffer was
-                 * transferred and skips the free. */
             } else {
                 l_img_comp_dest->data = l_tilec->data_win;
                 l_tilec->data_win = NULL;
@@ -11990,12 +11987,19 @@ static OPJ_BOOL opj_j2k_decode_tiles(opj_j2k_t *p_j2k,
             return OPJ_FALSE;
         }
 
-        /* Transfer TCD data to output image data */
+        /* Transfer TCD data to output image data. D6.1: recycle the
+         * previous image-owned buffer into the per-component TCD pool
+         * so the next tile's opj_alloc_tile_component_data can reuse
+         * it rather than paging in a fresh 256KB block from the
+         * allocator. */
         for (i = 0; i < p_j2k->m_output_image->numcomps; i++) {
-            opj_image_data_free(p_j2k->m_output_image->comps[i].data);
-            p_j2k->m_output_image->comps[i].data =
+            opj_image_comp_t *l_img_comp_i = &p_j2k->m_output_image->comps[i];
+            OPJ_SIZE_T l_size = (OPJ_SIZE_T)l_img_comp_i->w * l_img_comp_i->h *
+                                sizeof(OPJ_INT32);
+            opj_tcd_pool_recycle(p_j2k->m_tcd, i, l_img_comp_i->data, l_size);
+            l_img_comp_i->data =
                 p_j2k->m_tcd->tcd_image->tiles->comps[i].data;
-            p_j2k->m_output_image->comps[i].resno_decoded =
+            l_img_comp_i->resno_decoded =
                 p_j2k->m_tcd->image->comps[i].resno_decoded;
             p_j2k->m_tcd->tcd_image->tiles->comps[i].data = NULL;
         }

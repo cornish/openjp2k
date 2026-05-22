@@ -760,17 +760,7 @@ void opj_tcd_destroy(opj_tcd_t *tcd)
         if (tcd->data_pool.slots != NULL) {
             OPJ_UINT32 i;
             for (i = 0; i < tcd->data_pool.numcomps; ++i) {
-                /* Only free if not currently lent. A lent buffer has been
-                 * transferred to a downstream owner (e.g., the output image)
-                 * by a code path that bypassed our teardown — see the
-                 * tilec->data => image->comps[i].data transfer sites in
-                 * j2k.c (10383, 12010). Those sites null tilec->data but
-                 * don't touch slot->lent, so we use lent as the truth:
-                 *   lent == FALSE  -> teardown returned the buffer to the
-                 *                     pool; safe to free.
-                 *   lent == TRUE   -> transferred; downstream owns it. */
-                if (tcd->data_pool.slots[i].buf != NULL &&
-                        !tcd->data_pool.slots[i].lent) {
+                if (tcd->data_pool.slots[i].buf != NULL) {
                     opj_image_data_free(tcd->data_pool.slots[i].buf);
                 }
             }
@@ -800,7 +790,11 @@ OPJ_BOOL opj_alloc_tile_component_data(opj_tcd_tilecomp_t *l_tilec)
     }
 
     /* If the tilec previously self-allocated (ownsData), release that
-     * buffer before we hand it a pool buffer or a fresh allocation. */
+     * buffer before we hand it a pool buffer or a fresh allocation.
+     * The pool path also goes through ownsData=TRUE on handout, so this
+     * also handles the "tilec had a pool-served buffer that's now too
+     * small" case — we free the old, get a new one (possibly from the
+     * pool slot). */
     if (l_tilec->ownsData && l_tilec->data != 00) {
         opj_image_data_free(l_tilec->data);
         l_tilec->data      = 00;
@@ -808,49 +802,72 @@ OPJ_BOOL opj_alloc_tile_component_data(opj_tcd_tilecomp_t *l_tilec)
         l_tilec->data_size = 0;
     }
 
-    /* Pool path. parent_tcd is set in opj_tcd_init_tile; data_pool.slots
-     * is set in opj_tcd_init. If either is missing, fall back to legacy
-     * direct allocation. */
-    if (l_tilec->parent_tcd == NULL ||
-            l_tilec->parent_tcd->data_pool.slots == NULL ||
-            l_tilec->compno >= l_tilec->parent_tcd->data_pool.numcomps) {
-        l_tilec->data = (OPJ_INT32 *) opj_image_data_alloc(l_tilec->data_size_needed);
-        if (l_tilec->data == 00 && l_tilec->data_size_needed != 0) {
-            return OPJ_FALSE;
-        }
-        l_tilec->data_size = l_tilec->data_size_needed;
-        l_tilec->ownsData  = OPJ_TRUE;
-        return OPJ_TRUE;
-    }
-
-    slot = &l_tilec->parent_tcd->data_pool.slots[l_tilec->compno];
-
-    /* If the slot is still flagged lent, the previous tilec transferred
-     * the buffer to a downstream owner (e.g. the output image at
-     * j2k.c:10381 or :12010) and the pool can no longer reuse it. Drop
-     * the stale reference and allocate fresh. */
-    if (slot->lent) {
-        slot->buf  = NULL;
-        slot->size = 0;
-        slot->lent = OPJ_FALSE;
-    }
-
-    if (slot->buf == NULL || slot->size < l_tilec->data_size_needed) {
-        /* Grow or first-allocate. */
-        opj_image_data_free(slot->buf);
-        slot->buf = (OPJ_INT32 *) opj_image_data_alloc(l_tilec->data_size_needed);
-        if (slot->buf == NULL && l_tilec->data_size_needed != 0) {
+    /* D6.1: try the pool slot first. If parent_tcd is wired and the
+     * slot has a buffer big enough, hand it off (and clear the slot).
+     * Otherwise fall through to opj_image_data_alloc. */
+    if (l_tilec->parent_tcd != NULL &&
+            l_tilec->parent_tcd->data_pool.slots != NULL &&
+            l_tilec->compno < l_tilec->parent_tcd->data_pool.numcomps) {
+        slot = &l_tilec->parent_tcd->data_pool.slots[l_tilec->compno];
+        if (slot->buf != NULL && slot->size >= l_tilec->data_size_needed) {
+            l_tilec->data      = slot->buf;
+            l_tilec->data_size = slot->size;
+            l_tilec->ownsData  = OPJ_TRUE;
+            slot->buf  = NULL;
             slot->size = 0;
-            return OPJ_FALSE;
+            return OPJ_TRUE;
         }
-        slot->size = l_tilec->data_size_needed;
+        /* Slot too small or empty: free the leftover (if any) so it
+         * doesn't accumulate, then fall through to fresh alloc. */
+        if (slot->buf != NULL) {
+            opj_image_data_free(slot->buf);
+            slot->buf  = NULL;
+            slot->size = 0;
+        }
     }
 
-    l_tilec->data      = slot->buf;
-    l_tilec->data_size = slot->size;
-    l_tilec->ownsData  = OPJ_FALSE;   /* pool owns it */
-    slot->lent         = OPJ_TRUE;
+    /* Fresh allocation. ownsData=TRUE so legacy teardown frees it (or
+     * the j2k transfer site recycles it via opj_tcd_pool_recycle). */
+    l_tilec->data = (OPJ_INT32 *) opj_image_data_alloc(l_tilec->data_size_needed);
+    if (l_tilec->data == 00 && l_tilec->data_size_needed != 0) {
+        return OPJ_FALSE;
+    }
+    l_tilec->data_size = l_tilec->data_size_needed;
+    l_tilec->ownsData  = OPJ_TRUE;
     return OPJ_TRUE;
+}
+
+void opj_tcd_pool_recycle(opj_tcd_t *tcd, OPJ_UINT32 compno,
+                          OPJ_INT32 *buf, OPJ_SIZE_T size)
+{
+    opj_tcd_pool_slot_t *slot;
+
+    if (buf == NULL) {
+        return;
+    }
+    if (tcd == NULL ||
+            tcd->data_pool.slots == NULL ||
+            compno >= tcd->data_pool.numcomps) {
+        opj_image_data_free(buf);
+        return;
+    }
+
+    slot = &tcd->data_pool.slots[compno];
+    if (slot->buf == NULL) {
+        slot->buf  = buf;
+        slot->size = size;
+        return;
+    }
+    /* Slot already holds a recycled buffer. Keep the larger of the two
+     * (the next tile is likely to need at least the larger size); free
+     * the smaller. */
+    if (size > slot->size) {
+        opj_image_data_free(slot->buf);
+        slot->buf  = buf;
+        slot->size = size;
+    } else {
+        opj_image_data_free(buf);
+    }
 }
 
 /* ----------------------------------------------------------------------- */
@@ -2056,28 +2073,11 @@ static void opj_tcd_free_tile(opj_tcd_t *p_tcd)
             l_tile_comp->resolutions = 00;
         }
 
-        if (l_tile_comp->data != 00) {
-            /* D6.1: distinguish self-owned vs pool-owned vs caller-owned.
-             *   ownsData == TRUE                      -> self-owned: free.
-             *   ownsData == FALSE && data == slot->buf -> pool-owned: return.
-             *   ownsData == FALSE && data != slot->buf -> caller-owned
-             *     (e.g. whole-tile decode aliasing image pixels): leave it,
-             *     the caller frees. */
-            if (l_tile_comp->ownsData) {
-                opj_image_data_free(l_tile_comp->data);
-            } else if (l_tile_comp->parent_tcd != NULL &&
-                       l_tile_comp->parent_tcd->data_pool.slots != NULL &&
-                       l_tile_comp->compno < l_tile_comp->parent_tcd->data_pool.numcomps) {
-                opj_tcd_pool_slot_t *slot =
-                    &l_tile_comp->parent_tcd->data_pool.slots[l_tile_comp->compno];
-                if (slot->buf == l_tile_comp->data) {
-                    /* Pool-owned: keep the buffer alive in the pool; mark not lent. */
-                    slot->lent = OPJ_FALSE;
-                }
-            }
-            l_tile_comp->data             = 00;
-            l_tile_comp->ownsData         = 0;
-            l_tile_comp->data_size        = 0;
+        if (l_tile_comp->ownsData && l_tile_comp->data) {
+            opj_image_data_free(l_tile_comp->data);
+            l_tile_comp->data = 00;
+            l_tile_comp->ownsData = 0;
+            l_tile_comp->data_size = 0;
             l_tile_comp->data_size_needed = 0;
         }
 
