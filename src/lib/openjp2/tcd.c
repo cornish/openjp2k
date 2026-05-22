@@ -735,6 +735,14 @@ OPJ_BOOL opj_tcd_init(opj_tcd_t *p_tcd,
     p_tcd->tp_pos = p_cp->m_specific_param.m_enc.m_tp_pos;
     p_tcd->thread_pool = p_tp;
 
+    /* D6.1: initialize the per-component data buffer pool. */
+    p_tcd->data_pool.numcomps = p_image->numcomps;
+    p_tcd->data_pool.slots = (opj_tcd_pool_slot_t *) opj_calloc(
+                                 p_image->numcomps, sizeof(opj_tcd_pool_slot_t));
+    if (! p_tcd->data_pool.slots) {
+        return OPJ_FALSE;
+    }
+
     return OPJ_TRUE;
 }
 
@@ -745,6 +753,21 @@ void opj_tcd_destroy(opj_tcd_t *tcd)
 {
     if (tcd) {
         opj_tcd_free_tile(tcd);
+
+        /* D6.1: free pool buffers and slot array. Must run after
+         * opj_tcd_free_tile so that the per-tilec teardown there can
+         * still reach the pool to release lent buffers. */
+        if (tcd->data_pool.slots != NULL) {
+            OPJ_UINT32 i;
+            for (i = 0; i < tcd->data_pool.numcomps; ++i) {
+                if (tcd->data_pool.slots[i].buf != NULL) {
+                    opj_image_data_free(tcd->data_pool.slots[i].buf);
+                }
+            }
+            opj_free(tcd->data_pool.slots);
+            tcd->data_pool.slots = NULL;
+            tcd->data_pool.numcomps = 0;
+        }
 
         if (tcd->tcd_image) {
             opj_free(tcd->tcd_image);
@@ -874,6 +897,9 @@ static INLINE OPJ_BOOL opj_tcd_init_tile(opj_tcd_t *p_tcd, OPJ_UINT32 p_tile_no,
         l_tilec->x1 = opj_int_ceildiv(l_tile->x1, (OPJ_INT32)l_image_comp->dx);
         l_tilec->y1 = opj_int_ceildiv(l_tile->y1, (OPJ_INT32)l_image_comp->dy);
         l_tilec->compno = compno;
+        /* D6.1: back-pointer to the parent TCD so opj_alloc_tile_component_data
+         * can reach the pool from a tilec. */
+        l_tilec->parent_tcd = p_tcd;
         /*fprintf(stderr, "\tTile compo border = %d,%d,%d,%d\n", l_tilec->x0, l_tilec->y0,l_tilec->x1,l_tilec->y1);*/
 
         l_tilec->numresolutions = l_tccp->numresolutions;

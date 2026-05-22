@@ -244,9 +244,9 @@ typedef struct opj_tcd_tilecomp {
     /* number of pixels */
     OPJ_SIZE_T numpix;
 
-    /* D6.1: back-pointers used by opj_alloc_tile_component_data to
-     * reach the parent TCD's data_pool. Set once in opj_tcd_init_tile. */
-    OPJ_UINT32 comp_no;
+    /* D6.1: back-pointer used by opj_alloc_tile_component_data to reach
+     * the parent TCD's data_pool. Set once in opj_tcd_init_tile.
+     * Pool slot index is the existing `compno` field above. */
     struct opj_tcd *parent_tcd;
 } opj_tcd_tilecomp_t;
 
