@@ -191,6 +191,25 @@ typedef struct opj_tcd_resolution {
     OPJ_UINT32 win_y1;
 } opj_tcd_resolution_t;
 
+/* D6.1: per-component pool slot for the tile-component data buffer.
+ * The pool lives on opj_tcd_t and survives individual tile decodes,
+ * so buffers freed at one tile's transfer-to-image are reused by the
+ * next tile's allocation instead of round-tripping through the
+ * system allocator (which page-faults on first touch of fresh 256KB
+ * blocks). Each slot holds at most one free buffer at a time. */
+typedef struct opj_tcd_pool_slot {
+    OPJ_INT32 *buf;        /* available buffer (NULL if slot empty)      */
+    OPJ_SIZE_T size;       /* allocated size of buf in bytes (0 if NULL) */
+} opj_tcd_pool_slot_t;
+
+typedef struct opj_tcd_buffer_pool {
+    opj_tcd_pool_slot_t *slots;  /* numcomps slots; NULL until pool inited   */
+    OPJ_UINT32 numcomps;         /* matches image->numcomps when initialized */
+} opj_tcd_buffer_pool_t;
+
+/* Forward declaration so opj_tcd_tilecomp_t can hold a back-pointer. */
+struct opj_tcd;
+
 /** Tile-component structure */
 typedef struct opj_tcd_tilecomp {
     /* dimension of component : left upper corner (x0, y0) right low corner (x1,y1) */
@@ -225,6 +244,11 @@ typedef struct opj_tcd_tilecomp {
 
     /* number of pixels */
     OPJ_SIZE_T numpix;
+
+    /* D6.1: back-pointer used by opj_alloc_tile_component_data to reach
+     * the parent TCD's data_pool. Set once in opj_tcd_init_tile.
+     * Pool slot index is the existing `compno` field above. */
+    struct opj_tcd *parent_tcd;
 } opj_tcd_tilecomp_t;
 
 
@@ -288,6 +312,11 @@ typedef struct opj_tcd {
     OPJ_BOOL   whole_tile_decoding;
     /* Array of size image->numcomps indicating if a component must be decoded. NULL if all components must be decoded */
     OPJ_BOOL* used_component;
+
+    /* D6.1: per-component tile-component buffer pool. Lifetime is tied
+     * to this TCD; reset to all-NULL slots at opj_tcd_init, populated
+     * lazily by opj_alloc_tile_component_data, freed at opj_tcd_destroy. */
+    opj_tcd_buffer_pool_t data_pool;
 } opj_tcd_t;
 
 /**
@@ -470,6 +499,21 @@ OPJ_BOOL opj_tcd_copy_tile_data(opj_tcd_t *p_tcd,
  *
  */
 OPJ_BOOL opj_alloc_tile_component_data(opj_tcd_tilecomp_t *l_tilec);
+
+/* D6.1: pool-aware free for buffers that were handed out via the
+ * tile-component pool (most commonly via opj_alloc_tile_component_data).
+ * Callers that previously did opj_image_data_free(image->comp.data) at
+ * a tilec-to-image transfer site should call this instead so the
+ * buffer can be reused by the next tile's allocation.
+ *
+ * If the pool slot for `compno` is empty, the buffer is parked there
+ * for reuse. If the slot already holds an equal-or-larger buffer, the
+ * incoming buffer is freed (only one buffer is parked per slot). If
+ * the slot holds a smaller buffer, the smaller one is freed and the
+ * incoming buffer replaces it. NULL ptr is a no-op (matches
+ * opj_image_data_free's behaviour). */
+void opj_tcd_pool_recycle(opj_tcd_t *tcd, OPJ_UINT32 compno,
+                          OPJ_INT32 *buf, OPJ_SIZE_T size);
 
 /** Returns whether a sub-band is empty (i.e. whether it has a null area)
  * @param band Sub-band handle.

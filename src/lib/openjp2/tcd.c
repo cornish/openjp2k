@@ -735,6 +735,14 @@ OPJ_BOOL opj_tcd_init(opj_tcd_t *p_tcd,
     p_tcd->tp_pos = p_cp->m_specific_param.m_enc.m_tp_pos;
     p_tcd->thread_pool = p_tp;
 
+    /* D6.1: initialize the per-component data buffer pool. */
+    p_tcd->data_pool.numcomps = p_image->numcomps;
+    p_tcd->data_pool.slots = (opj_tcd_pool_slot_t *) opj_calloc(
+                                 p_image->numcomps, sizeof(opj_tcd_pool_slot_t));
+    if (! p_tcd->data_pool.slots) {
+        return OPJ_FALSE;
+    }
+
     return OPJ_TRUE;
 }
 
@@ -745,6 +753,21 @@ void opj_tcd_destroy(opj_tcd_t *tcd)
 {
     if (tcd) {
         opj_tcd_free_tile(tcd);
+
+        /* D6.1: free pool buffers and slot array. Must run after
+         * opj_tcd_free_tile so that the per-tilec teardown there can
+         * still reach the pool to release lent buffers. */
+        if (tcd->data_pool.slots != NULL) {
+            OPJ_UINT32 i;
+            for (i = 0; i < tcd->data_pool.numcomps; ++i) {
+                if (tcd->data_pool.slots[i].buf != NULL) {
+                    opj_image_data_free(tcd->data_pool.slots[i].buf);
+                }
+            }
+            opj_free(tcd->data_pool.slots);
+            tcd->data_pool.slots = NULL;
+            tcd->data_pool.numcomps = 0;
+        }
 
         if (tcd->tcd_image) {
             opj_free(tcd->tcd_image);
@@ -759,31 +782,92 @@ void opj_tcd_destroy(opj_tcd_t *tcd)
 
 OPJ_BOOL opj_alloc_tile_component_data(opj_tcd_tilecomp_t *l_tilec)
 {
-    if ((l_tilec->data == 00) ||
-            ((l_tilec->data_size_needed > l_tilec->data_size) &&
-             (l_tilec->ownsData == OPJ_FALSE))) {
-        l_tilec->data = (OPJ_INT32 *) opj_image_data_alloc(l_tilec->data_size_needed);
-        if (!l_tilec->data && l_tilec->data_size_needed != 0) {
-            return OPJ_FALSE;
-        }
-        /*fprintf(stderr, "tAllocate data of tilec (int): %d x OPJ_UINT32n",l_data_size);*/
-        l_tilec->data_size = l_tilec->data_size_needed;
-        l_tilec->ownsData = OPJ_TRUE;
-    } else if (l_tilec->data_size_needed > l_tilec->data_size) {
-        /* We don't need to keep old data */
-        opj_image_data_free(l_tilec->data);
-        l_tilec->data = (OPJ_INT32 *) opj_image_data_alloc(l_tilec->data_size_needed);
-        if (! l_tilec->data) {
-            l_tilec->data_size = 0;
-            l_tilec->data_size_needed = 0;
-            l_tilec->ownsData = OPJ_FALSE;
-            return OPJ_FALSE;
-        }
-        /*fprintf(stderr, "tReallocate data of tilec (int): from %d to %d x OPJ_UINT32n", l_tilec->data_size, l_data_size);*/
-        l_tilec->data_size = l_tilec->data_size_needed;
-        l_tilec->ownsData = OPJ_TRUE;
+    opj_tcd_pool_slot_t *slot;
+
+    /* Fast path: tilec already holds a buffer big enough. */
+    if (l_tilec->data != 00 && l_tilec->data_size_needed <= l_tilec->data_size) {
+        return OPJ_TRUE;
     }
+
+    /* If the tilec previously self-allocated (ownsData), release that
+     * buffer before we hand it a pool buffer or a fresh allocation.
+     * The pool path also goes through ownsData=TRUE on handout, so this
+     * also handles the "tilec had a pool-served buffer that's now too
+     * small" case — we free the old, get a new one (possibly from the
+     * pool slot). */
+    if (l_tilec->ownsData && l_tilec->data != 00) {
+        opj_image_data_free(l_tilec->data);
+        l_tilec->data      = 00;
+        l_tilec->ownsData  = OPJ_FALSE;
+        l_tilec->data_size = 0;
+    }
+
+    /* D6.1: try the pool slot first. If parent_tcd is wired and the
+     * slot has a buffer big enough, hand it off (and clear the slot).
+     * Otherwise fall through to opj_image_data_alloc. */
+    if (l_tilec->parent_tcd != NULL &&
+            l_tilec->parent_tcd->data_pool.slots != NULL &&
+            l_tilec->compno < l_tilec->parent_tcd->data_pool.numcomps) {
+        slot = &l_tilec->parent_tcd->data_pool.slots[l_tilec->compno];
+        if (slot->buf != NULL && slot->size >= l_tilec->data_size_needed) {
+            l_tilec->data      = slot->buf;
+            l_tilec->data_size = slot->size;
+            l_tilec->ownsData  = OPJ_TRUE;
+            slot->buf  = NULL;
+            slot->size = 0;
+            return OPJ_TRUE;
+        }
+        /* Slot too small or empty: free the leftover (if any) so it
+         * doesn't accumulate, then fall through to fresh alloc. */
+        if (slot->buf != NULL) {
+            opj_image_data_free(slot->buf);
+            slot->buf  = NULL;
+            slot->size = 0;
+        }
+    }
+
+    /* Fresh allocation. ownsData=TRUE so legacy teardown frees it (or
+     * the j2k transfer site recycles it via opj_tcd_pool_recycle). */
+    l_tilec->data = (OPJ_INT32 *) opj_image_data_alloc(l_tilec->data_size_needed);
+    if (l_tilec->data == 00 && l_tilec->data_size_needed != 0) {
+        return OPJ_FALSE;
+    }
+    l_tilec->data_size = l_tilec->data_size_needed;
+    l_tilec->ownsData  = OPJ_TRUE;
     return OPJ_TRUE;
+}
+
+void opj_tcd_pool_recycle(opj_tcd_t *tcd, OPJ_UINT32 compno,
+                          OPJ_INT32 *buf, OPJ_SIZE_T size)
+{
+    opj_tcd_pool_slot_t *slot;
+
+    if (buf == NULL) {
+        return;
+    }
+    if (tcd == NULL ||
+            tcd->data_pool.slots == NULL ||
+            compno >= tcd->data_pool.numcomps) {
+        opj_image_data_free(buf);
+        return;
+    }
+
+    slot = &tcd->data_pool.slots[compno];
+    if (slot->buf == NULL) {
+        slot->buf  = buf;
+        slot->size = size;
+        return;
+    }
+    /* Slot already holds a recycled buffer. Keep the larger of the two
+     * (the next tile is likely to need at least the larger size); free
+     * the smaller. */
+    if (size > slot->size) {
+        opj_image_data_free(slot->buf);
+        slot->buf  = buf;
+        slot->size = size;
+    } else {
+        opj_image_data_free(buf);
+    }
 }
 
 /* ----------------------------------------------------------------------- */
@@ -874,6 +958,9 @@ static INLINE OPJ_BOOL opj_tcd_init_tile(opj_tcd_t *p_tcd, OPJ_UINT32 p_tile_no,
         l_tilec->x1 = opj_int_ceildiv(l_tile->x1, (OPJ_INT32)l_image_comp->dx);
         l_tilec->y1 = opj_int_ceildiv(l_tile->y1, (OPJ_INT32)l_image_comp->dy);
         l_tilec->compno = compno;
+        /* D6.1: back-pointer to the parent TCD so opj_alloc_tile_component_data
+         * can reach the pool from a tilec. */
+        l_tilec->parent_tcd = p_tcd;
         /*fprintf(stderr, "\tTile compo border = %d,%d,%d,%d\n", l_tilec->x0, l_tilec->y0,l_tilec->x1,l_tilec->y1);*/
 
         l_tilec->numresolutions = l_tccp->numresolutions;
