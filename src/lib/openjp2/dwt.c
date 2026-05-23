@@ -3240,7 +3240,83 @@ static void opj_v8dwt_interleave_partial_v(opj_v8dwt_t* OPJ_RESTRICT dwt,
     OPJ_UNUSED(ret);
 }
 
-#ifdef __SSE__
+#ifdef __AVX2__
+
+/* SP3.1: AVX2 variant of opj_v8dwt_decode_step1_sse.
+ *
+ * One opj_v8_t (8 floats, 32 bytes) matches one __m256.  The SSE2 path
+ * processes the same record as two consecutive __m128 ops; AVX2 does
+ * it in one.  Unaligned load/store because wavelet[] is allocated with
+ * opj_aligned_malloc (16-byte guarantee, not 32-byte).  No FMA — keep
+ * the mul + add sequence byte-identical to the SSE2 path. */
+static void opj_v8dwt_decode_step1_avx2(opj_v8_t* w,
+                                        OPJ_UINT32 start,
+                                        OPJ_UINT32 end,
+                                        const __m256 c)
+{
+    OPJ_FLOAT32* OPJ_RESTRICT fw = (OPJ_FLOAT32*) w;
+    OPJ_UINT32 i;
+    /* 2 * NB_ELTS_V8 floats per two-band stride; use unaligned
+     * load/store because wavelet[] is opj_aligned_malloc (16-byte). */
+    fw += 2 * NB_ELTS_V8 * start;
+    for (i = start; i < end; ++i, fw += 2 * NB_ELTS_V8) {
+        __m256 v = _mm256_loadu_ps(fw);
+        _mm256_storeu_ps(fw, _mm256_mul_ps(v, c));
+    }
+}
+
+/* SP3.1: AVX2 variant of opj_v8dwt_decode_step2_sse. */
+static void opj_v8dwt_decode_step2_avx2(opj_v8_t* l, opj_v8_t* w,
+                                        OPJ_UINT32 start,
+                                        OPJ_UINT32 end,
+                                        OPJ_UINT32 m,
+                                        __m256 c)
+{
+    OPJ_FLOAT32* OPJ_RESTRICT fl = (OPJ_FLOAT32*) l;
+    OPJ_FLOAT32* OPJ_RESTRICT fw = (OPJ_FLOAT32*) w;
+    OPJ_UINT32 i;
+    OPJ_UINT32 imax = opj_uint_min(end, m);
+    /* fw points at the current low-band element; fw - NB_ELTS_V8
+     * is the immediately preceding high-band element this step updates.
+     * Unaligned load/store: wavelet[] is 16-byte aligned, not 32-byte. */
+    if (start == 0) {
+        if (imax >= 1) {
+            __m256 vl0 = _mm256_loadu_ps(fl);
+            __m256 vw0 = _mm256_loadu_ps(fw);
+            __m256 vwm = _mm256_loadu_ps(fw - NB_ELTS_V8);
+            vwm = _mm256_add_ps(vwm, _mm256_mul_ps(_mm256_add_ps(vl0, vw0), c));
+            _mm256_storeu_ps(fw - NB_ELTS_V8, vwm);
+            fl = fw;              /* mirror SSE2: prev low-band = old vw[0] */
+            fw += 2 * NB_ELTS_V8;
+            start = 1;
+        }
+    } else {
+        fw += start * 2 * NB_ELTS_V8;
+        fl = fw - 2 * NB_ELTS_V8;
+    }
+
+    i = start;
+    for (; i < imax; ++i) {
+        __m256 vfl = _mm256_loadu_ps(fl);
+        __m256 vw0 = _mm256_loadu_ps(fw);
+        __m256 vwm = _mm256_loadu_ps(fw - NB_ELTS_V8);
+        vwm = _mm256_add_ps(vwm, _mm256_mul_ps(_mm256_add_ps(vfl, vw0), c));
+        _mm256_storeu_ps(fw - NB_ELTS_V8, vwm);
+        fl = fw;
+        fw += 2 * NB_ELTS_V8;
+    }
+    if (m < end) {
+        __m256 vfl, vwm;
+        assert(m + 1 == end);
+        c = _mm256_add_ps(c, c);
+        vfl = _mm256_loadu_ps(fl);
+        vwm = _mm256_loadu_ps(fw - NB_ELTS_V8);
+        vwm = _mm256_add_ps(vwm, _mm256_mul_ps(c, vfl));
+        _mm256_storeu_ps(fw - NB_ELTS_V8, vwm);
+    }
+}
+
+#elif defined(__SSE__)
 
 static void opj_v8dwt_decode_step1_sse(opj_v8_t* w,
                                        OPJ_UINT32 start,
@@ -3453,7 +3529,28 @@ static void opj_v8dwt_decode(opj_v8dwt_t* OPJ_RESTRICT dwt)
         a = 1;
         b = 0;
     }
-#ifdef __SSE__
+#ifdef __AVX2__
+    opj_v8dwt_decode_step1_avx2(dwt->wavelet + a, dwt->win_l_x0, dwt->win_l_x1,
+                                _mm256_set1_ps(opj_K));
+    opj_v8dwt_decode_step1_avx2(dwt->wavelet + b, dwt->win_h_x0, dwt->win_h_x1,
+                                _mm256_set1_ps(two_invK));
+    opj_v8dwt_decode_step2_avx2(dwt->wavelet + b, dwt->wavelet + a + 1,
+                                dwt->win_l_x0, dwt->win_l_x1,
+                                (OPJ_UINT32)opj_int_min(dwt->sn, dwt->dn - a),
+                                _mm256_set1_ps(-opj_dwt_delta));
+    opj_v8dwt_decode_step2_avx2(dwt->wavelet + a, dwt->wavelet + b + 1,
+                                dwt->win_h_x0, dwt->win_h_x1,
+                                (OPJ_UINT32)opj_int_min(dwt->dn, dwt->sn - b),
+                                _mm256_set1_ps(-opj_dwt_gamma));
+    opj_v8dwt_decode_step2_avx2(dwt->wavelet + b, dwt->wavelet + a + 1,
+                                dwt->win_l_x0, dwt->win_l_x1,
+                                (OPJ_UINT32)opj_int_min(dwt->sn, dwt->dn - a),
+                                _mm256_set1_ps(-opj_dwt_beta));
+    opj_v8dwt_decode_step2_avx2(dwt->wavelet + a, dwt->wavelet + b + 1,
+                                dwt->win_h_x0, dwt->win_h_x1,
+                                (OPJ_UINT32)opj_int_min(dwt->dn, dwt->sn - b),
+                                _mm256_set1_ps(-opj_dwt_alpha));
+#elif defined(__SSE__)
     opj_v8dwt_decode_step1_sse(dwt->wavelet + a, dwt->win_l_x0, dwt->win_l_x1,
                                _mm_set1_ps(opj_K));
     opj_v8dwt_decode_step1_sse(dwt->wavelet + b, dwt->win_h_x0, dwt->win_h_x1,
