@@ -75,9 +75,11 @@ static opj_image_t *decode_file(const char *path)
 
     image = NULL;
     if (!opj_read_header(stream, codec, &image) ||
-        !opj_decode(codec, stream, image) ||
-        !opj_end_decompress(codec, stream)) {
-        if (image) opj_image_destroy(image);
+            !opj_decode(codec, stream, image) ||
+            !opj_end_decompress(codec, stream)) {
+        if (image) {
+            opj_image_destroy(image);
+        }
         opj_destroy_codec(codec);
         opj_stream_destroy(stream);
         return NULL;
@@ -113,8 +115,8 @@ static int compare_images(opj_image_t *a, opj_image_t *b, const char *path)
             for (i = 0; i < n; ++i) {
                 if (ca->data[i] != cb->data[i]) {
                     fprintf(stderr,
-                        "[%s] comp %u pixel %u differs: %d vs %d\n",
-                        path, c, i, ca->data[i], cb->data[i]);
+                            "[%s] comp %u pixel %u differs: %d vs %d\n",
+                            path, c, i, ca->data[i], cb->data[i]);
                     break;
                 }
             }
