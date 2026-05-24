@@ -148,6 +148,13 @@ Inverse wavelet transform in 2-D.
 static OPJ_BOOL opj_dwt_decode_tile(opj_thread_pool_t* tp,
                                     opj_tcd_tilecomp_t* tilec, OPJ_UINT32 i);
 
+/* SP3.2: int16 variant, AVX2 only. */
+#ifdef __AVX2__
+static OPJ_BOOL opj_dwt_decode_tile_int16(opj_thread_pool_t* tp,
+        opj_tcd_tilecomp_t* tilec,
+        OPJ_UINT32 numres);
+#endif
+
 static OPJ_BOOL opj_dwt_decode_partial_tile(
     opj_tcd_tilecomp_t* tilec,
     OPJ_UINT32 numres);
@@ -748,6 +755,94 @@ static void opj_idwt53_h(const opj_dwt_t *dwt,
 #endif
 #define ADD3(x,y,z) ADD(ADD(x,y),z)
 
+/* SP3.2: int16 mirror macros for the 5/3 IDWT.  Only AVX2 is defined —
+ * the int16 path activates only when OPJ_ENABLE_AVX2 is ON.
+ * VREG_S16 holds 16 int16 lanes per __m256i (vs 8 int32 lanes in VREG). */
+#ifdef __AVX2__
+#define VREG_S16        __m256i
+#define LOAD_CST_S16(x) _mm256_set1_epi16((int16_t)(x))
+#define LOAD_S16(x)     _mm256_load_si256((const VREG_S16*)(x))
+#define LOADU_S16(x)    _mm256_loadu_si256((const VREG_S16*)(x))
+#define STORE_S16(x,y)  _mm256_store_si256((VREG_S16*)(x),(y))
+#define STOREU_S16(x,y) _mm256_storeu_si256((VREG_S16*)(x),(y))
+#define ADD_S16(x,y)    _mm256_add_epi16((x),(y))
+#define SUB_S16(x,y)    _mm256_sub_epi16((x),(y))
+#define SAR_S16(x,y)    _mm256_srai_epi16((x),(y))
+#define ADD3_S16(x,y,z) ADD_S16(ADD_S16(x,y),z)
+
+#define VREG_S16_INT_COUNT  16
+#define PARALLEL_COLS_53_S16 (2 * VREG_S16_INT_COUNT)  /* 32 columns per v-pass */
+#endif /* __AVX2__ */
+
+#ifdef __AVX2__
+
+/* SP3.2: Pack a buffer of OPJ_INT32 into int16_t using AVX2.
+ *
+ * Reads 16 int32s (two __m256i registers), packs to 16 int16s
+ * (one __m256i via _mm256_packs_epi32), then fixes the per-lane
+ * shuffle that _mm256_packs_epi32 leaves behind by permuting
+ * with imm8=0xD8 (binary 11 01 10 00) to restore linear order.
+ *
+ * Saturates — but for prec <= 8 source data, no input element can
+ * exceed int16 range, so saturation never triggers.  An assert in
+ * Debug catches any violation. */
+static void opj_dwt_pack_int32_to_int16_avx2(int16_t* OPJ_RESTRICT dst,
+        const OPJ_INT32* OPJ_RESTRICT src,
+        OPJ_SIZE_T n)
+{
+    OPJ_SIZE_T i = 0;
+    for (; i + 16 <= n; i += 16) {
+        __m256i lo = _mm256_loadu_si256((const __m256i*)(src + i));
+        __m256i hi = _mm256_loadu_si256((const __m256i*)(src + i + 8));
+        __m256i packed = _mm256_packs_epi32(lo, hi);
+        packed = _mm256_permute4x64_epi64(packed, 0xD8);
+#ifndef NDEBUG
+        /* Saturation sentinel: if any source element exceeded int16
+         * range, packs_epi32 would have clamped it; in that case the
+         * packed-and-sign-extended round-trip will differ from src. */
+        {
+            __m256i lo_check = _mm256_cvtepi16_epi32(
+                                   _mm256_castsi256_si128(packed));
+            __m256i hi_check = _mm256_cvtepi16_epi32(
+                                   _mm256_extracti128_si256(packed, 1));
+            assert(_mm256_movemask_epi8(_mm256_cmpeq_epi32(lo, lo_check))
+                   == -1);
+            assert(_mm256_movemask_epi8(_mm256_cmpeq_epi32(hi, hi_check))
+                   == -1);
+        }
+#endif
+        _mm256_storeu_si256((__m256i*)(dst + i), packed);
+    }
+    for (; i < n; ++i) {
+        assert(src[i] >= INT16_MIN && src[i] <= INT16_MAX);
+        dst[i] = (int16_t)src[i];
+    }
+}
+
+/* SP3.2: Unpack a buffer of int16_t into OPJ_INT32 using AVX2.
+ *
+ * Reads 16 int16s (one __m256i), sign-extends to 16 int32s
+ * (two __m256i via _mm256_cvtepi16_epi32). */
+static void opj_dwt_unpack_int16_to_int32_avx2(OPJ_INT32* OPJ_RESTRICT dst,
+        const int16_t* OPJ_RESTRICT src,
+        OPJ_SIZE_T n)
+{
+    OPJ_SIZE_T i = 0;
+    for (; i + 16 <= n; i += 16) {
+        __m256i packed = _mm256_loadu_si256((const __m256i*)(src + i));
+        __m256i lo = _mm256_cvtepi16_epi32(_mm256_castsi256_si128(packed));
+        __m256i hi = _mm256_cvtepi16_epi32(
+                         _mm256_extracti128_si256(packed, 1));
+        _mm256_storeu_si256((__m256i*)(dst + i), lo);
+        _mm256_storeu_si256((__m256i*)(dst + i + 8), hi);
+    }
+    for (; i < n; ++i) {
+        dst[i] = (OPJ_INT32)src[i];
+    }
+}
+
+#endif /* __AVX2__ */
+
 static
 void opj_idwt53_v_final_memcpy(OPJ_INT32* tiledp_col,
                                const OPJ_INT32* tmp,
@@ -978,6 +1073,622 @@ static void opj_idwt53_v_cas1_mcols_SIMD(
 
     opj_idwt53_v_final_memcpy(tiledp_col, tmp, len, stride);
 }
+
+/* -----------------------------------------------------------------------
+ * SP3.2: AVX2 int16 kernels for the 5/3 IDWT
+ * ----------------------------------------------------------------------- */
+#ifdef __AVX2__
+
+/* SP3.2: int16 final_memcpy — mirrors opj_idwt53_v_final_memcpy but for
+ * the int16 scratch buffer (PARALLEL_COLS_53_S16 = 32 cols per row). */
+static void opj_idwt53_v_final_memcpy_int16(int16_t* tiledp_col,
+        const int16_t* tmp,
+        OPJ_INT32 len,
+        OPJ_SIZE_T stride)
+{
+    OPJ_INT32 i;
+    for (i = 0; i < len; ++i) {
+        STOREU_S16(&tiledp_col[(OPJ_SIZE_T)i * stride + 0],
+                   LOAD_S16(&tmp[PARALLEL_COLS_53_S16 * i + 0]));
+        STOREU_S16(&tiledp_col[(OPJ_SIZE_T)i * stride + VREG_S16_INT_COUNT],
+                   LOAD_S16(&tmp[PARALLEL_COLS_53_S16 * i + VREG_S16_INT_COUNT]));
+    }
+}
+
+/* SP3.2: AVX2 int16 mirror of opj_idwt53_h_cas0 (the AVX2 branch at
+ * dwt.c:494-555).  Same lift formula:
+ *
+ *   even[i] = lf[i] - ((hf[i-1] + hf[i] + 2) >> 2);     (smooth)
+ *   odd[i]  = hf[i] + ((even[i-1] + even[i]) >> 1);      (detail)
+ *
+ * but on 16 int16 lanes per __m256i instead of 8 int32 lanes.  The
+ * horizontal-shift lane-rotation that the int32 path does with
+ * _mm256_permutevar8x32_epi32 + _mm256_blend_epi32 is replaced by
+ * _mm256_bslli_epi128 + _mm256_permute2x128_si256 + _mm256_blend_epi16
+ * (no permutevar8x32 for int16). */
+static void opj_idwt53_h_cas0_int16_avx2(int16_t* tmp,
+        const OPJ_INT32 sn,
+        const OPJ_INT32 len,
+        int16_t* tiledp)
+{
+    OPJ_INT32 i, j;
+    const int16_t* in_even = &tiledp[0];
+    const int16_t* in_odd = &tiledp[sn];
+
+    int16_t* out_ptr = tmp;
+    int16_t prev_even = (int16_t)(in_even[0] - ((in_odd[0] + 1) >> 1));
+
+    const __m256i two = _mm256_set1_epi16(2);
+
+    int32_t simd_batch = (len - 2) / 32;
+    int16_t next_even;
+    __m256i even_m1, odd;
+
+    for (i = 0; i < simd_batch; i++) {
+        const __m256i lf = _mm256_loadu_si256((const __m256i*)(in_even + 1));
+        const __m256i hf1 = _mm256_loadu_si256((const __m256i*)in_odd);
+        const __m256i hf2 = _mm256_loadu_si256((const __m256i*)(in_odd + 1));
+
+        __m256i even = _mm256_add_epi16(hf1, hf2);
+        even = _mm256_add_epi16(even, two);
+        even = _mm256_srai_epi16(even, 2);
+        even = _mm256_sub_epi16(lf, even);
+
+        /* next_even = last lane of even (lane 15) */
+        next_even = (int16_t)_mm256_extract_epi16(even, 15);
+
+        /* even_m1[k] = even[k-1] for k>0, even_m1[0] = prev_even.
+         * Shift left by 2 bytes (1 int16 lane) within each 128-bit half
+         * (zeroes lane 0 of each half), patch lane 0 with prev_even and
+         * lane 8 (first lane of high half) with even[7]. */
+        {
+            /* Shift: lanes 1..7 <- even[0..6], lane 0=0, lane 9..15 <- even[8..14], lane 8=0 */
+            __m256i shifted = _mm256_bslli_epi128(even, 2);
+            /* Extract even[7] to patch into lane 8 */
+            int16_t even7 = (int16_t)_mm256_extract_epi16(even, 7);
+            /* Patch lane 0 of low half with prev_even */
+            even_m1 = _mm256_blend_epi16(shifted, _mm256_set1_epi16(prev_even), 0x01);
+            /* Patch lane 8 (first lane of high 128-bit half) with even[7] */
+            even_m1 = _mm256_insert_epi16(even_m1, (int)even7, 8);
+        }
+
+        odd = _mm256_add_epi16(even_m1, even);
+        odd = _mm256_srai_epi16(odd, 1);
+        odd = _mm256_add_epi16(odd, hf1);
+
+        /* Interleave even_m1 and odd into the output buffer.
+         * unpacklo/hi_epi16 interleaves within each 128-bit lane;
+         * permute2x128 stitches the two results in linear order. */
+        {
+            __m256i unpack1 = _mm256_unpacklo_epi16(even_m1, odd);
+            __m256i unpack2 = _mm256_unpackhi_epi16(even_m1, odd);
+            __m256i lo = _mm256_permute2x128_si256(unpack1, unpack2, 0x20);
+            __m256i hi = _mm256_permute2x128_si256(unpack1, unpack2, 0x31);
+            _mm256_storeu_si256((__m256i*)(out_ptr + 0), lo);
+            _mm256_storeu_si256((__m256i*)(out_ptr + 16), hi);
+        }
+
+        prev_even = next_even;
+
+        out_ptr += 32;
+        in_even += 16;
+        in_odd += 16;
+    }
+    out_ptr[0] = prev_even;
+    for (j = simd_batch * 32 + 1; j < (len - 2); j += 2) {
+        out_ptr[2] = (int16_t)(in_even[1] - ((in_odd[0] + in_odd[1] + 2) >> 2));
+        out_ptr[1] = (int16_t)(in_odd[0] + ((out_ptr[0] + out_ptr[2]) >> 1));
+        in_even++;
+        in_odd++;
+        out_ptr += 2;
+    }
+
+    if (len & 1) {
+        out_ptr[2] = (int16_t)(in_even[1] - ((in_odd[0] + 1) >> 1));
+        out_ptr[1] = (int16_t)(in_odd[0] + ((out_ptr[0] + out_ptr[2]) >> 1));
+    } else {
+        out_ptr[1] = (int16_t)(in_odd[0] + out_ptr[0]);
+    }
+    memcpy(tiledp, tmp, (OPJ_UINT32)len * sizeof(int16_t));
+}
+
+/* SP3.2: AVX2 int16 mirror of opj_idwt53_h_cas1 (dwt.c:595-661).
+ *
+ * Lift formulas (decode cas1):
+ *   dc[i]   = in_odd[i] - ((in_even[i] + in_even[i+1] + 2) >> 2)
+ *   even[0] = in_even[0] + dc[0]
+ *   even[i] = in_even[i] + ((dc[i-1] + dc[i]) >> 1)  for i > 0
+ *
+ * SIMD processes 16 in_odd + 16 in_even per batch → 32 outputs.
+ * Lane-rotate workaround for dc_m1 is same pattern as cas0_int16_avx2. */
+static void opj_idwt53_h_cas1_int16_avx2(int16_t* tmp,
+        const OPJ_INT32 sn,
+        const OPJ_INT32 len,
+        int16_t* tiledp)
+{
+    /* All local variables declared at the top (C89/C90 compliance). */
+    OPJ_INT32 i, j;
+    const int16_t* in_even;
+    const int16_t* in_odd;
+    int16_t* out_ptr;
+    __m256i two;
+    int32_t simd_batch;
+    int16_t next_dc;
+    __m256i dc_m1, even_out;
+    int16_t prev_dc;
+    /* Scalar epilogue temporaries */
+    int16_t s1_s, s2_s, dc_s, dn_s;
+    OPJ_INT32 out_pos;   /* position in tmp for the scalar epilogue */
+
+    in_even = &tiledp[sn];
+    in_odd  = &tiledp[0];
+    out_ptr = tmp;
+    two = _mm256_set1_epi16(2);
+    simd_batch = (len - 2) / 32;
+
+    /* prev_dc: carries the last dc value across SIMD batches.
+     * Initialized to dc[0] so that the formula
+     *   even[0] = s1[0] + ((prev_dc + dc[0]) >> 1)
+     * gives s1[0] + dc[0], matching the scalar: tmp[0] = in_even[0] + dc. */
+    prev_dc = (int16_t)(in_odd[0] - ((in_even[0] + in_even[1] + 2) >> 2));
+
+    for (i = 0; i < simd_batch; i++) {
+        __m256i hf  = _mm256_loadu_si256((const __m256i*)in_odd);
+        __m256i s1  = _mm256_loadu_si256((const __m256i*)in_even);
+        __m256i s2  = _mm256_loadu_si256((const __m256i*)(in_even + 1));
+        __m256i dc;
+        __m256i shifted;
+        __m256i unpack1, unpack2, lo, hi;
+
+        /* dc = hf - ((s1 + s2 + 2) >> 2) */
+        dc = _mm256_add_epi16(s1, s2);
+        dc = _mm256_add_epi16(dc, two);
+        dc = _mm256_srai_epi16(dc, 2);
+        dc = _mm256_sub_epi16(hf, dc);
+
+        /* next_dc = last lane of dc (lane 15) */
+        next_dc = (int16_t)_mm256_extract_epi16(dc, 15);
+
+        /* dc_m1[k] = dc[k-1] for k>0, dc_m1[0] = prev_dc.
+         * Same lane-rotate workaround as cas0_int16_avx2:
+         * shift within each 128-bit half, patch lane 0 and lane 8. */
+        shifted = _mm256_bslli_epi128(dc, 2);
+        {
+            int16_t dc7 = (int16_t)_mm256_extract_epi16(dc, 7);
+            dc_m1 = _mm256_blend_epi16(shifted, _mm256_set1_epi16(prev_dc), 0x01);
+            dc_m1 = _mm256_insert_epi16(dc_m1, (int)dc7, 8);
+        }
+
+        /* even_out = s1 + ((dc_m1 + dc) >> 1) */
+        even_out = _mm256_add_epi16(dc_m1, dc);
+        even_out = _mm256_srai_epi16(even_out, 1);
+        even_out = _mm256_add_epi16(s1, even_out);
+
+        /* Interleave even_out and dc into output buffer.
+         * Output order: even[0], dc[0], even[1], dc[1], ... */
+        unpack1 = _mm256_unpacklo_epi16(even_out, dc);
+        unpack2 = _mm256_unpackhi_epi16(even_out, dc);
+        lo = _mm256_permute2x128_si256(unpack1, unpack2, 0x20);
+        hi = _mm256_permute2x128_si256(unpack1, unpack2, 0x31);
+        _mm256_storeu_si256((__m256i*)(out_ptr + 0), lo);
+        _mm256_storeu_si256((__m256i*)(out_ptr + 16), hi);
+
+        prev_dc = next_dc;
+        out_ptr += 32;
+        in_even += 16;
+        in_odd  += 16;
+    }
+
+    /* Scalar epilogue.
+     *
+     * After the SIMD loop, in_even and in_odd point to the remaining
+     * (unprocessed) input elements.  out_ptr points to the first remaining
+     * output slot in tmp[].  prev_dc holds the last dc value produced.
+     *
+     * We replay the scalar cas1 logic.  In the scalar, output positions
+     * are: even-positions (0,2,4,...) = smooth; odd-positions (1,3,5,...) = dc.
+     * After SIMD, out_ptr is at an even output position.
+     *
+     * The scalar loop below writes pairs (smooth, dc) at (out_ptr[0], out_ptr[1])
+     * until the parity-specific epilogue. */
+    out_pos = simd_batch * 32;
+
+    if (simd_batch == 0) {
+        /* No SIMD batches: run the full scalar cas1 from scratch.
+         * Mirrors opj_idwt53_h_cas1 exactly. */
+        s1_s = in_even[1];
+        dc_s = (int16_t)(in_odd[0] - ((in_even[0] + s1_s + 2) >> 2));
+        tmp[0] = (int16_t)(in_even[0] + dc_s);
+        for (i = 1, j = 1; i < (len - 2 - !(len & 1)); i += 2, j++) {
+            s2_s = in_even[j + 1];
+            dn_s = (int16_t)(in_odd[j] - ((s1_s + s2_s + 2) >> 2));
+            tmp[i    ] = dc_s;
+            tmp[i + 1] = (int16_t)(s1_s + ((dn_s + dc_s) >> 1));
+            dc_s = dn_s;
+            s1_s = s2_s;
+        }
+        tmp[i] = dc_s;
+        if (!(len & 1)) {
+            dn_s = (int16_t)(in_odd[len / 2 - 1] - ((s1_s + 1) >> 1));
+            tmp[len - 2] = (int16_t)(s1_s + ((dn_s + dc_s) >> 1));
+            tmp[len - 1] = dn_s;
+        } else {
+            tmp[len - 1] = (int16_t)(s1_s + dc_s);
+        }
+    } else {
+        /* SIMD batches ran.  in_even[j] / in_odd[j] are the remaining inputs,
+         * indexed by j relative to the advanced pointers.  prev_dc is the
+         * last dc.  We write pairs (smooth=out_ptr[0], dc=out_ptr[1]) stepping
+         * by 2.  out_ptr / i advance together (out_ptr = tmp + i). */
+        s1_s = in_even[0];
+        dc_s = prev_dc;
+        i    = out_pos;
+        j    = 0;
+        /* Write pairs (smooth at i, dc at i+1) while more pairs remain
+         * before the parity epilogue.  The scalar loop writes pairs until
+         * position len-3 (for even len the epilogue then adds two more
+         * elements; for odd len it adds one).  Condition: i < len - 2
+         * stops before the epilogue boundary. */
+        while (i < len - 2) {
+            s2_s = in_even[j + 1];
+            dn_s = (int16_t)(in_odd[j] - ((s1_s + s2_s + 2) >> 2));
+            tmp[i    ] = (int16_t)(s1_s + ((dc_s + dn_s) >> 1));   /* smooth */
+            tmp[i + 1] = dn_s;                                       /* dc */
+            dc_s = dn_s;
+            s1_s = s2_s;
+            i += 2;
+            j++;
+        }
+        if (!(len & 1)) {
+            /* Even-length epilogue: two more elements.
+             * tmp[len-2] = s1 + ((dn + dc) >> 1),  tmp[len-1] = dn
+             * where dn = in_odd[j] - ((s1 + 1) >> 1). */
+            dn_s = (int16_t)(in_odd[j] - ((s1_s + 1) >> 1));
+            tmp[len - 2] = (int16_t)(s1_s + ((dc_s + dn_s) >> 1));
+            tmp[len - 1] = dn_s;
+        } else {
+            /* Odd-length epilogue: one more element. */
+            tmp[len - 1] = (int16_t)(s1_s + dc_s);
+        }
+    }
+
+    memcpy(tiledp, tmp, (OPJ_UINT32)len * sizeof(int16_t));
+}
+
+/* SP3.2: AVX2 int16 mirror of opj_idwt53_v_cas0_mcols_SIMD (dwt.c:773).
+ * Uses the int16 macros from Step 2.  Processes PARALLEL_COLS_53_S16 (32)
+ * columns per pass instead of 16. */
+static void opj_idwt53_v_cas0_mcols_int16_avx2(
+    int16_t* tmp,
+    const OPJ_INT32 sn,
+    const OPJ_INT32 len,
+    int16_t* tiledp_col,
+    const OPJ_SIZE_T stride)
+{
+    const int16_t* in_even = &tiledp_col[0];
+    const int16_t* in_odd = &tiledp_col[(OPJ_SIZE_T)sn * stride];
+
+    OPJ_INT32 i;
+    OPJ_SIZE_T j;
+    VREG_S16 d1c_0, d1n_0, s1n_0, s0c_0, s0n_0;
+    VREG_S16 d1c_1, d1n_1, s1n_1, s0c_1, s0n_1;
+    const VREG_S16 two = LOAD_CST_S16(2);
+
+    assert(len > 1);
+    assert(PARALLEL_COLS_53_S16 == 32);
+    assert(VREG_S16_INT_COUNT == 16);
+
+    /* Note: loads of input even/odd values must be done in an unaligned
+     * fashion. But stores in tmp can be done with aligned store, since
+     * the temporary buffer is properly aligned */
+    assert((OPJ_SIZE_T)tmp % (sizeof(int16_t) * VREG_S16_INT_COUNT) == 0);
+
+    s1n_0 = LOADU_S16(in_even + 0);
+    s1n_1 = LOADU_S16(in_even + VREG_S16_INT_COUNT);
+    d1n_0 = LOADU_S16(in_odd);
+    d1n_1 = LOADU_S16(in_odd + VREG_S16_INT_COUNT);
+
+    /* s0n = s1n - ((d1n + 1) >> 1); <==> */
+    /* s0n = s1n - ((d1n + d1n + 2) >> 2); */
+    s0n_0 = SUB_S16(s1n_0, SAR_S16(ADD3_S16(d1n_0, d1n_0, two), 2));
+    s0n_1 = SUB_S16(s1n_1, SAR_S16(ADD3_S16(d1n_1, d1n_1, two), 2));
+
+    for (i = 0, j = 1; i < (len - 3); i += 2, j++) {
+        d1c_0 = d1n_0;
+        s0c_0 = s0n_0;
+        d1c_1 = d1n_1;
+        s0c_1 = s0n_1;
+
+        s1n_0 = LOADU_S16(in_even + j * stride);
+        s1n_1 = LOADU_S16(in_even + j * stride + VREG_S16_INT_COUNT);
+        d1n_0 = LOADU_S16(in_odd + j * stride);
+        d1n_1 = LOADU_S16(in_odd + j * stride + VREG_S16_INT_COUNT);
+
+        /* s0n = s1n - ((d1c + d1n + 2) >> 2); */
+        s0n_0 = SUB_S16(s1n_0, SAR_S16(ADD3_S16(d1c_0, d1n_0, two), 2));
+        s0n_1 = SUB_S16(s1n_1, SAR_S16(ADD3_S16(d1c_1, d1n_1, two), 2));
+
+        STORE_S16(tmp + PARALLEL_COLS_53_S16 * (i + 0), s0c_0);
+        STORE_S16(tmp + PARALLEL_COLS_53_S16 * (i + 0) + VREG_S16_INT_COUNT, s0c_1);
+
+        /* d1c + ((s0c + s0n) >> 1) */
+        STORE_S16(tmp + PARALLEL_COLS_53_S16 * (i + 1) + 0,
+                  ADD_S16(d1c_0, SAR_S16(ADD_S16(s0c_0, s0n_0), 1)));
+        STORE_S16(tmp + PARALLEL_COLS_53_S16 * (i + 1) + VREG_S16_INT_COUNT,
+                  ADD_S16(d1c_1, SAR_S16(ADD_S16(s0c_1, s0n_1), 1)));
+    }
+
+    STORE_S16(tmp + PARALLEL_COLS_53_S16 * (i + 0) + 0, s0n_0);
+    STORE_S16(tmp + PARALLEL_COLS_53_S16 * (i + 0) + VREG_S16_INT_COUNT, s0n_1);
+
+    if (len & 1) {
+        VREG_S16 tmp_len_minus_1;
+        s1n_0 = LOADU_S16(in_even + (OPJ_SIZE_T)((len - 1) / 2) * stride);
+        /* tmp_len_minus_1 = s1n - ((d1n + 1) >> 1); */
+        tmp_len_minus_1 = SUB_S16(s1n_0, SAR_S16(ADD3_S16(d1n_0, d1n_0, two), 2));
+        STORE_S16(tmp + PARALLEL_COLS_53_S16 * (len - 1), tmp_len_minus_1);
+        /* d1n + ((s0n + tmp_len_minus_1) >> 1) */
+        STORE_S16(tmp + PARALLEL_COLS_53_S16 * (len - 2),
+                  ADD_S16(d1n_0, SAR_S16(ADD_S16(s0n_0, tmp_len_minus_1), 1)));
+
+        s1n_1 = LOADU_S16(in_even + (OPJ_SIZE_T)((len - 1) / 2) * stride + VREG_S16_INT_COUNT);
+        /* tmp_len_minus_1 = s1n - ((d1n + 1) >> 1); */
+        tmp_len_minus_1 = SUB_S16(s1n_1, SAR_S16(ADD3_S16(d1n_1, d1n_1, two), 2));
+        STORE_S16(tmp + PARALLEL_COLS_53_S16 * (len - 1) + VREG_S16_INT_COUNT,
+                  tmp_len_minus_1);
+        /* d1n + ((s0n + tmp_len_minus_1) >> 1) */
+        STORE_S16(tmp + PARALLEL_COLS_53_S16 * (len - 2) + VREG_S16_INT_COUNT,
+                  ADD_S16(d1n_1, SAR_S16(ADD_S16(s0n_1, tmp_len_minus_1), 1)));
+    } else {
+        STORE_S16(tmp + PARALLEL_COLS_53_S16 * (len - 1) + 0,
+                  ADD_S16(d1n_0, s0n_0));
+        STORE_S16(tmp + PARALLEL_COLS_53_S16 * (len - 1) + VREG_S16_INT_COUNT,
+                  ADD_S16(d1n_1, s0n_1));
+    }
+
+    opj_idwt53_v_final_memcpy_int16(tiledp_col, tmp, len, stride);
+}
+
+/* SP3.2: AVX2 int16 mirror of opj_idwt53_v_cas1_mcols_SIMD (dwt.c:880).
+ * Same translation pattern: VREG -> VREG_S16, PARALLEL_COLS_53 -> PARALLEL_COLS_53_S16,
+ * OPJ_INT32 -> int16_t strides. */
+static void opj_idwt53_v_cas1_mcols_int16_avx2(
+    int16_t* tmp,
+    const OPJ_INT32 sn,
+    const OPJ_INT32 len,
+    int16_t* tiledp_col,
+    const OPJ_SIZE_T stride)
+{
+    OPJ_INT32 i;
+    OPJ_SIZE_T j;
+
+    VREG_S16 s1_0, s2_0, dc_0, dn_0;
+    VREG_S16 s1_1, s2_1, dc_1, dn_1;
+    const VREG_S16 two = LOAD_CST_S16(2);
+
+    const int16_t* in_even = &tiledp_col[(OPJ_SIZE_T)sn * stride];
+    const int16_t* in_odd = &tiledp_col[0];
+
+    assert(len > 2);
+    assert(PARALLEL_COLS_53_S16 == 32);
+    assert(VREG_S16_INT_COUNT == 16);
+
+    /* Note: loads of input even/odd values must be done in an unaligned
+     * fashion. But stores in tmp can be done with aligned store, since
+     * the temporary buffer is properly aligned */
+    assert((OPJ_SIZE_T)tmp % (sizeof(int16_t) * VREG_S16_INT_COUNT) == 0);
+
+    s1_0 = LOADU_S16(in_even + stride);
+    /* dc = in_odd[0] - ((in_even[0] + s1 + 2) >> 2); */
+    dc_0 = SUB_S16(LOADU_S16(in_odd + 0),
+                   SAR_S16(ADD3_S16(LOADU_S16(in_even + 0), s1_0, two), 2));
+    STORE_S16(tmp + PARALLEL_COLS_53_S16 * 0,
+              ADD_S16(LOADU_S16(in_even + 0), dc_0));
+
+    s1_1 = LOADU_S16(in_even + stride + VREG_S16_INT_COUNT);
+    /* dc = in_odd[0] - ((in_even[0] + s1 + 2) >> 2); */
+    dc_1 = SUB_S16(LOADU_S16(in_odd + VREG_S16_INT_COUNT),
+                   SAR_S16(ADD3_S16(LOADU_S16(in_even + VREG_S16_INT_COUNT), s1_1, two), 2));
+    STORE_S16(tmp + PARALLEL_COLS_53_S16 * 0 + VREG_S16_INT_COUNT,
+              ADD_S16(LOADU_S16(in_even + VREG_S16_INT_COUNT), dc_1));
+
+    for (i = 1, j = 1; i < (len - 2 - !(len & 1)); i += 2, j++) {
+
+        s2_0 = LOADU_S16(in_even + (j + 1) * stride);
+        s2_1 = LOADU_S16(in_even + (j + 1) * stride + VREG_S16_INT_COUNT);
+
+        /* dn = in_odd[j * stride] - ((s1 + s2 + 2) >> 2); */
+        dn_0 = SUB_S16(LOADU_S16(in_odd + j * stride),
+                       SAR_S16(ADD3_S16(s1_0, s2_0, two), 2));
+        dn_1 = SUB_S16(LOADU_S16(in_odd + j * stride + VREG_S16_INT_COUNT),
+                       SAR_S16(ADD3_S16(s1_1, s2_1, two), 2));
+
+        STORE_S16(tmp + PARALLEL_COLS_53_S16 * i, dc_0);
+        STORE_S16(tmp + PARALLEL_COLS_53_S16 * i + VREG_S16_INT_COUNT, dc_1);
+
+        /* tmp[i + 1] = s1 + ((dn + dc) >> 1); */
+        STORE_S16(tmp + PARALLEL_COLS_53_S16 * (i + 1) + 0,
+                  ADD_S16(s1_0, SAR_S16(ADD_S16(dn_0, dc_0), 1)));
+        STORE_S16(tmp + PARALLEL_COLS_53_S16 * (i + 1) + VREG_S16_INT_COUNT,
+                  ADD_S16(s1_1, SAR_S16(ADD_S16(dn_1, dc_1), 1)));
+
+        dc_0 = dn_0;
+        s1_0 = s2_0;
+        dc_1 = dn_1;
+        s1_1 = s2_1;
+    }
+    STORE_S16(tmp + PARALLEL_COLS_53_S16 * i, dc_0);
+    STORE_S16(tmp + PARALLEL_COLS_53_S16 * i + VREG_S16_INT_COUNT, dc_1);
+
+    if (!(len & 1)) {
+        /* dn = in_odd[(len / 2 - 1) * stride] - ((s1 + 1) >> 1); */
+        dn_0 = SUB_S16(LOADU_S16(in_odd + (OPJ_SIZE_T)(len / 2 - 1) * stride),
+                       SAR_S16(ADD3_S16(s1_0, s1_0, two), 2));
+        dn_1 = SUB_S16(LOADU_S16(in_odd + (OPJ_SIZE_T)(len / 2 - 1) * stride + VREG_S16_INT_COUNT),
+                       SAR_S16(ADD3_S16(s1_1, s1_1, two), 2));
+
+        /* tmp[len - 2] = s1 + ((dn + dc) >> 1); */
+        STORE_S16(tmp + PARALLEL_COLS_53_S16 * (len - 2) + 0,
+                  ADD_S16(s1_0, SAR_S16(ADD_S16(dn_0, dc_0), 1)));
+        STORE_S16(tmp + PARALLEL_COLS_53_S16 * (len - 2) + VREG_S16_INT_COUNT,
+                  ADD_S16(s1_1, SAR_S16(ADD_S16(dn_1, dc_1), 1)));
+
+        STORE_S16(tmp + PARALLEL_COLS_53_S16 * (len - 1) + 0, dn_0);
+        STORE_S16(tmp + PARALLEL_COLS_53_S16 * (len - 1) + VREG_S16_INT_COUNT, dn_1);
+    } else {
+        STORE_S16(tmp + PARALLEL_COLS_53_S16 * (len - 1) + 0, ADD_S16(s1_0, dc_0));
+        STORE_S16(tmp + PARALLEL_COLS_53_S16 * (len - 1) + VREG_S16_INT_COUNT,
+                  ADD_S16(s1_1, dc_1));
+    }
+
+    opj_idwt53_v_final_memcpy_int16(tiledp_col, tmp, len, stride);
+}
+
+/* SP3.2: Horizontal IDWT dispatcher for the int16 path.
+ * Mirrors opj_idwt53_h (dwt.c:671). */
+static void opj_idwt53_h_int16(const opj_dwt_t *dwt,
+                               int16_t* tiledp,
+                               int16_t* mem)
+{
+    const OPJ_INT32 sn = dwt->sn;
+    const OPJ_INT32 len = sn + dwt->dn;
+    if (dwt->cas == 0) {
+        if (len > 1) {
+            opj_idwt53_h_cas0_int16_avx2(mem, sn, len, tiledp);
+        }
+        /* len == 1: unmodified value */
+    } else {
+        if (len == 1) {
+            tiledp[0] = (int16_t)(tiledp[0] / 2);
+        } else if (len == 2) {
+            int16_t* out = mem;
+            const int16_t* in_even = &tiledp[sn];
+            const int16_t* in_odd = &tiledp[0];
+            out[1] = (int16_t)(in_odd[0] - ((in_even[0] + 1) >> 1));
+            out[0] = (int16_t)(in_even[0] + out[1]);
+            memcpy(tiledp, mem, (OPJ_UINT32)len * sizeof(int16_t));
+        } else if (len > 2) {
+            opj_idwt53_h_cas1_int16_avx2(mem, sn, len, tiledp);
+        }
+    }
+}
+
+/* SP3.2: Vertical IDWT dispatcher for the int16 path.
+ * Mirrors opj_idwt53_v (dwt.c:1099). */
+static void opj_idwt53_v_int16(const opj_dwt_t *dwt,
+                               int16_t* tiledp_col,
+                               OPJ_SIZE_T stride,
+                               OPJ_INT32 nb_cols,
+                               int16_t* mem)
+{
+    const OPJ_INT32 sn = dwt->sn;
+    const OPJ_INT32 len = sn + dwt->dn;
+    if (dwt->cas == 0) {
+        /* If len == 1, unmodified value */
+        if (len > 1 && nb_cols == PARALLEL_COLS_53_S16) {
+            opj_idwt53_v_cas0_mcols_int16_avx2(mem, sn, len, tiledp_col, stride);
+            return;
+        }
+        if (len > 1) {
+            /* Scalar fallback per-column for tail groups */
+            OPJ_INT32 c;
+            for (c = 0; c < nb_cols; c++, tiledp_col++) {
+                OPJ_INT32 i, jj;
+                int16_t d1c_s, d1n_s, s1n_s, s0c_s, s0n_s;
+                int16_t* col = tiledp_col;
+                s1n_s = col[0];
+                d1n_s = col[(OPJ_SIZE_T)sn * stride];
+                s0n_s = (int16_t)(s1n_s - ((d1n_s + 1) >> 1));
+                for (i = 0, jj = 0; i < (len - 3); i += 2, jj++) {
+                    d1c_s = d1n_s;
+                    s0c_s = s0n_s;
+                    s1n_s = col[(OPJ_SIZE_T)(jj + 1) * stride];
+                    d1n_s = col[(OPJ_SIZE_T)(sn + jj + 1) * stride];
+                    s0n_s = (int16_t)(s1n_s - ((d1c_s + d1n_s + 2) >> 2));
+                    mem[i    ] = s0c_s;
+                    mem[i + 1] = (int16_t)(d1c_s + ((s0c_s + s0n_s) >> 1));
+                }
+                mem[i] = s0n_s;
+                if (len & 1) {
+                    mem[len - 1] = (int16_t)(col[(OPJ_SIZE_T)((len - 1) / 2) * stride] - ((d1n_s + 1) >> 1));
+                    mem[len - 2] = (int16_t)(d1n_s + ((s0n_s + mem[len - 1]) >> 1));
+                } else {
+                    mem[len - 1] = (int16_t)(d1n_s + s0n_s);
+                }
+                for (i = 0; i < len; ++i) {
+                    col[(OPJ_SIZE_T)i * stride] = mem[i];
+                }
+            }
+            return;
+        }
+    } else {
+        if (len == 1) {
+            OPJ_INT32 c;
+            for (c = 0; c < nb_cols; c++, tiledp_col++) {
+                tiledp_col[0] = (int16_t)(tiledp_col[0] / 2);
+            }
+            return;
+        }
+
+        if (len == 2) {
+            OPJ_INT32 c;
+            for (c = 0; c < nb_cols; c++, tiledp_col++) {
+                OPJ_INT32 ii;
+                int16_t out0, out1;
+                const int16_t* in_even = &tiledp_col[(OPJ_SIZE_T)sn * stride];
+                const int16_t* in_odd = &tiledp_col[0];
+                out1 = (int16_t)(in_odd[0] - ((in_even[0] + 1) >> 1));
+                out0 = (int16_t)(in_even[0] + out1);
+                tiledp_col[0] = out0;
+                for (ii = 1; ii < len; ++ii) {
+                    tiledp_col[(OPJ_SIZE_T)ii * stride] = out1;
+                }
+            }
+            return;
+        }
+
+        if (len > 2 && nb_cols == PARALLEL_COLS_53_S16) {
+            opj_idwt53_v_cas1_mcols_int16_avx2(mem, sn, len, tiledp_col, stride);
+            return;
+        }
+        if (len > 2) {
+            /* Scalar fallback per-column for tail groups */
+            OPJ_INT32 c;
+            for (c = 0; c < nb_cols; c++, tiledp_col++) {
+                OPJ_INT32 i, jj;
+                int16_t s1_s, s2_s, dc_s, dn_s;
+                int16_t* col = tiledp_col;
+                const int16_t* in_even_c = &col[(OPJ_SIZE_T)sn * stride];
+                const int16_t* in_odd_c  = &col[0];
+                s1_s = in_even_c[stride];
+                dc_s = (int16_t)(in_odd_c[0] - ((in_even_c[0] + s1_s + 2) >> 2));
+                mem[0] = (int16_t)(in_even_c[0] + dc_s);
+                for (i = 1, jj = 1; i < (len - 2 - !(len & 1)); i += 2, jj++) {
+                    s2_s = in_even_c[(OPJ_SIZE_T)(jj + 1) * stride];
+                    dn_s = (int16_t)(in_odd_c[(OPJ_SIZE_T)jj * stride] - ((s1_s + s2_s + 2) >> 2));
+                    mem[i    ] = dc_s;
+                    mem[i + 1] = (int16_t)(s1_s + ((dn_s + dc_s) >> 1));
+                    dc_s = dn_s;
+                    s1_s = s2_s;
+                }
+                mem[i] = dc_s;
+                if (!(len & 1)) {
+                    dn_s = (int16_t)(in_odd_c[(OPJ_SIZE_T)(len / 2 - 1) * stride] - ((s1_s + 1) >> 1));
+                    mem[len - 2] = (int16_t)(s1_s + ((dn_s + dc_s) >> 1));
+                    mem[len - 1] = dn_s;
+                } else {
+                    mem[len - 1] = (int16_t)(s1_s + dc_s);
+                }
+                for (i = 0; i < len; ++i) {
+                    col[(OPJ_SIZE_T)i * stride] = mem[i];
+                }
+            }
+            return;
+        }
+    }
+}
+
+#endif /* __AVX2__ */
 
 #undef VREG
 #undef LOAD_CST
@@ -2137,6 +2848,17 @@ OPJ_BOOL opj_dwt_decode(opj_tcd_t *p_tcd, opj_tcd_tilecomp_t* tilec,
                         OPJ_UINT32 numres)
 {
     if (p_tcd->whole_tile_decoding) {
+#ifdef __AVX2__
+        /* SP3.2: int16 path for <=8-bit precision components. */
+        {
+            const OPJ_UINT32 compno = (OPJ_UINT32)(tilec -
+                                      p_tcd->tcd_image->tiles->comps);
+            const opj_image_comp_t *image_comp = &p_tcd->image->comps[compno];
+            if (image_comp->prec <= 8) {
+                return opj_dwt_decode_tile_int16(p_tcd->thread_pool, tilec, numres);
+            }
+        }
+#endif
         return opj_dwt_decode_tile(p_tcd->thread_pool, tilec, numres);
     } else {
         return opj_dwt_decode_partial_tile(tilec, numres);
@@ -2283,6 +3005,246 @@ static void opj_dwt_decode_v_func(void* user_data, opj_tls_t* tls)
     opj_free(job);
 }
 
+/* -----------------------------------------------------------------------
+ * SP3.2: int16 job structures, callbacks, and orchestrator
+ * ----------------------------------------------------------------------- */
+#ifdef __AVX2__
+
+typedef struct {
+    opj_dwt_t h;
+    OPJ_UINT32 rw;
+    OPJ_UINT32 w;
+    int16_t * OPJ_RESTRICT tiledp;
+    int16_t * OPJ_RESTRICT mem;   /* per-job scratch */
+    OPJ_UINT32 min_j;
+    OPJ_UINT32 max_j;
+} opj_dwt_decode_h_job_int16_t;
+
+static void opj_dwt_decode_h_int16_func(void* user_data, opj_tls_t* tls)
+{
+    OPJ_UINT32 j;
+    opj_dwt_decode_h_job_int16_t* job;
+    (void)tls;
+
+    job = (opj_dwt_decode_h_job_int16_t*)user_data;
+    for (j = job->min_j; j < job->max_j; j++) {
+        opj_idwt53_h_int16(&job->h, &job->tiledp[j * job->w], job->mem);
+    }
+
+    opj_aligned_free(job->mem);
+    opj_free(job);
+}
+
+typedef struct {
+    opj_dwt_t v;
+    OPJ_UINT32 rh;
+    OPJ_UINT32 w;
+    int16_t * OPJ_RESTRICT tiledp;
+    int16_t * OPJ_RESTRICT mem;   /* per-job scratch */
+    OPJ_UINT32 min_j;
+    OPJ_UINT32 max_j;
+} opj_dwt_decode_v_job_int16_t;
+
+static void opj_dwt_decode_v_int16_func(void* user_data, opj_tls_t* tls)
+{
+    OPJ_UINT32 j;
+    opj_dwt_decode_v_job_int16_t* job;
+    (void)tls;
+
+    job = (opj_dwt_decode_v_job_int16_t*)user_data;
+    for (j = job->min_j; j + PARALLEL_COLS_53_S16 <= job->max_j;
+            j += PARALLEL_COLS_53_S16) {
+        opj_idwt53_v_int16(&job->v, &job->tiledp[j], (OPJ_SIZE_T)job->w,
+                           PARALLEL_COLS_53_S16, job->mem);
+    }
+    if (j < job->max_j)
+        opj_idwt53_v_int16(&job->v, &job->tiledp[j], (OPJ_SIZE_T)job->w,
+                           (OPJ_INT32)(job->max_j - j), job->mem);
+
+    opj_aligned_free(job->mem);
+    opj_free(job);
+}
+
+/* SP3.2: Inverse 5/3 wavelet for int16 path.  Mirrors
+ * opj_dwt_decode_tile (the int32 orchestrator) but operates on an
+ * int16 scratch buffer that holds the packed version of tilec->data
+ * for the duration of the IDWT. */
+static OPJ_BOOL opj_dwt_decode_tile_int16(opj_thread_pool_t* tp,
+        opj_tcd_tilecomp_t* tilec,
+        OPJ_UINT32 numres)
+{
+    opj_dwt_t h;
+    opj_dwt_t v;
+
+    opj_tcd_resolution_t* tr = tilec->resolutions;
+
+    OPJ_UINT32 rw = (OPJ_UINT32)(tr->x1 - tr->x0);
+    OPJ_UINT32 rh = (OPJ_UINT32)(tr->y1 - tr->y0);
+
+    OPJ_UINT32 w = (OPJ_UINT32)(tilec->resolutions[tilec->minimum_num_resolutions -
+                                                             1].x1 -
+                                tilec->resolutions[tilec->minimum_num_resolutions - 1].x0);
+    OPJ_UINT32 full_h = (OPJ_UINT32)(tilec->resolutions[tilec->minimum_num_resolutions -
+                                                                  1].y1 -
+                                     tilec->resolutions[tilec->minimum_num_resolutions - 1].y0);
+    OPJ_SIZE_T tilec_area = (OPJ_SIZE_T)w * full_h;
+    OPJ_SIZE_T h_mem_size;
+    int num_threads;
+
+    int16_t* scratch_data = NULL;
+    int16_t* mem = NULL;
+
+    /* h.mem and v.mem are not used for int16; we manage memory separately */
+    h.mem = NULL;
+    v.mem = NULL;
+
+    if (numres == 1U || w == 0) {
+        return OPJ_TRUE;
+    }
+    num_threads = opj_thread_pool_get_thread_count(tp);
+    h_mem_size = opj_dwt_max_resolution(tr, numres);
+    if (h_mem_size > (SIZE_MAX / PARALLEL_COLS_53_S16 / sizeof(int16_t))) {
+        return OPJ_FALSE;
+    }
+    h_mem_size *= PARALLEL_COLS_53_S16 * sizeof(int16_t);
+    mem = (int16_t*)opj_aligned_32_malloc(h_mem_size);
+    if (!mem) {
+        return OPJ_FALSE;
+    }
+
+    /* Allocate the int16 working buffer (half the size of tilec->data). */
+    scratch_data = (int16_t*)opj_aligned_32_malloc(tilec_area * sizeof(int16_t));
+    if (!scratch_data) {
+        opj_aligned_free(mem);
+        return OPJ_FALSE;
+    }
+
+    /* Pack tilec->data (int32) -> scratch_data (int16). */
+    opj_dwt_pack_int32_to_int16_avx2(scratch_data, tilec->data, tilec_area);
+
+    while (--numres) {
+        int16_t * OPJ_RESTRICT tiledp = scratch_data;
+        OPJ_UINT32 j;
+
+        ++tr;
+        h.sn = (OPJ_INT32)rw;
+        v.sn = (OPJ_INT32)rh;
+
+        rw = (OPJ_UINT32)(tr->x1 - tr->x0);
+        rh = (OPJ_UINT32)(tr->y1 - tr->y0);
+
+        h.dn = (OPJ_INT32)(rw - (OPJ_UINT32)h.sn);
+        h.cas = tr->x0 % 2;
+
+        if (num_threads <= 1 || rh <= 1) {
+            for (j = 0; j < rh; ++j) {
+                opj_idwt53_h_int16(&h, &tiledp[(OPJ_SIZE_T)j * w], mem);
+            }
+        } else {
+            OPJ_UINT32 num_jobs = (OPJ_UINT32)num_threads;
+            OPJ_UINT32 step_j;
+
+            if (rh < num_jobs) {
+                num_jobs = rh;
+            }
+            step_j = (rh / num_jobs);
+
+            for (j = 0; j < num_jobs; j++) {
+                opj_dwt_decode_h_job_int16_t* job;
+                job = (opj_dwt_decode_h_job_int16_t*) opj_malloc(
+                          sizeof(opj_dwt_decode_h_job_int16_t));
+                if (!job) {
+                    opj_thread_pool_wait_completion(tp, 0);
+                    opj_aligned_free(mem);
+                    opj_aligned_free(scratch_data);
+                    return OPJ_FALSE;
+                }
+                job->h = h;
+                job->rw = rw;
+                job->w = w;
+                job->tiledp = tiledp;
+                job->min_j = j * step_j;
+                job->max_j = (j + 1U) * step_j;
+                if (j == (num_jobs - 1U)) {
+                    job->max_j = rh;
+                }
+                job->mem = (int16_t*)opj_aligned_32_malloc(h_mem_size);
+                if (!job->mem) {
+                    opj_thread_pool_wait_completion(tp, 0);
+                    opj_free(job);
+                    opj_aligned_free(mem);
+                    opj_aligned_free(scratch_data);
+                    return OPJ_FALSE;
+                }
+                opj_thread_pool_submit_job(tp, opj_dwt_decode_h_int16_func, job);
+            }
+            opj_thread_pool_wait_completion(tp, 0);
+        }
+
+        v.dn = (OPJ_INT32)(rh - (OPJ_UINT32)v.sn);
+        v.cas = tr->y0 % 2;
+
+        if (num_threads <= 1 || rw <= 1) {
+            for (j = 0; j + PARALLEL_COLS_53_S16 <= rw;
+                    j += PARALLEL_COLS_53_S16) {
+                opj_idwt53_v_int16(&v, &tiledp[j], (OPJ_SIZE_T)w,
+                                   PARALLEL_COLS_53_S16, mem);
+            }
+            if (j < rw) {
+                opj_idwt53_v_int16(&v, &tiledp[j], (OPJ_SIZE_T)w,
+                                   (OPJ_INT32)(rw - j), mem);
+            }
+        } else {
+            OPJ_UINT32 num_jobs = (OPJ_UINT32)num_threads;
+            OPJ_UINT32 step_j;
+
+            if (rw < num_jobs) {
+                num_jobs = rw;
+            }
+            step_j = (rw / num_jobs);
+
+            for (j = 0; j < num_jobs; j++) {
+                opj_dwt_decode_v_job_int16_t* job;
+                job = (opj_dwt_decode_v_job_int16_t*) opj_malloc(
+                          sizeof(opj_dwt_decode_v_job_int16_t));
+                if (!job) {
+                    opj_thread_pool_wait_completion(tp, 0);
+                    opj_aligned_free(mem);
+                    opj_aligned_free(scratch_data);
+                    return OPJ_FALSE;
+                }
+                job->v = v;
+                job->rh = rh;
+                job->w = w;
+                job->tiledp = tiledp;
+                job->min_j = j * step_j;
+                job->max_j = (j + 1U) * step_j;
+                if (j == (num_jobs - 1U)) {
+                    job->max_j = rw;
+                }
+                job->mem = (int16_t*)opj_aligned_32_malloc(h_mem_size);
+                if (!job->mem) {
+                    opj_thread_pool_wait_completion(tp, 0);
+                    opj_free(job);
+                    opj_aligned_free(mem);
+                    opj_aligned_free(scratch_data);
+                    return OPJ_FALSE;
+                }
+                opj_thread_pool_submit_job(tp, opj_dwt_decode_v_int16_func, job);
+            }
+            opj_thread_pool_wait_completion(tp, 0);
+        }
+    }
+
+    /* Unpack scratch_data (int16) -> tilec->data (int32). */
+    opj_dwt_unpack_int16_to_int32_avx2(tilec->data, scratch_data, tilec_area);
+
+    opj_aligned_free(scratch_data);
+    opj_aligned_free(mem);
+    return OPJ_TRUE;
+}
+
+#endif /* __AVX2__ */
 
 /* <summary>                            */
 /* Inverse wavelet transform in 2-D.    */
