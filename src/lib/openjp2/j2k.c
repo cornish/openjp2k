@@ -10202,7 +10202,18 @@ OPJ_BOOL opj_j2k_decode_tile(opj_j2k_t * p_j2k,
                 opj_event_msg(p_manager, EVT_WARNING, "Stream does not end with EOC\n");
                 return OPJ_TRUE;
             }
-            opj_event_msg(p_manager, EVT_ERROR, "Stream too short, expected SOT\n");
+            /* Encoder Psot-underrun recovery: some encoders (notably the
+             * J2KR DICOM compsamples) write a Psot that under-reports the
+             * tile-part length, leaving raw tile-bitstream bytes between
+             * the announced tile-part end and EOC. Strict mode rejects;
+             * non-strict mode treats as NEOC and accepts the partial
+             * decode, mirroring the truncated-stream handling above. */
+            opj_event_msg(p_manager, p_j2k->m_cp.strict ? EVT_ERROR : EVT_WARNING,
+                          "Stream too short, expected SOT\n");
+            if (!p_j2k->m_cp.strict) {
+                p_j2k->m_specific_param.m_decoder.m_state = J2K_STATE_NEOC;
+                return OPJ_TRUE;
+            }
             return OPJ_FALSE;
         }
     }
