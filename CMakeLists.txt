@@ -167,6 +167,22 @@ if(CMAKE_COMPILER_IS_GNUCC)
   # Do not use ffast-math for all build, it would produce incorrect results, only set for release:
   set(OPENJPEG_LIBRARY_COMPILE_OPTIONS ${OPENJPEG_LIBRARY_COMPILE_OPTIONS} "$<$<CONFIG:Release>:-ffast-math>")
   set(OPENJP2_COMPILE_OPTIONS ${OPENJP2_COMPILE_OPTIONS} "$<$<CONFIG:Release>:-ffast-math>" -Wall -Wextra -Wconversion -Wunused-parameter -Wdeclaration-after-statement -Werror=declaration-after-statement -Wstrict-prototypes -Werror=strict-prototypes -Wmissing-prototypes -Werror=missing-prototypes)
+  # SP3.1: opt-in AVX2 for the 9/7 float IDWT lift.  Default OFF for
+  # portability: enabling adds -mavx2 to the openjp2 compile flags, which
+  # produces a binary that requires an AVX2-capable CPU at runtime.  Set
+  # ON only for builds targeting AVX2 hosts (most modern x86_64).  When
+  # OFF, the existing SSE2/NEON path is active and the binary remains
+  # portable to pre-Haswell / pre-Excavator x86 hardware.
+  option(OPJ_ENABLE_AVX2 "Build openjp2 with AVX2 SIMD kernels (requires AVX2-capable CPU at runtime)" OFF)
+  if(OPJ_ENABLE_AVX2)
+    include(CheckCCompilerFlag)
+    check_c_compiler_flag(-mavx2 OPJ_COMPILER_SUPPORTS_AVX2_FLAG)
+    if(OPJ_COMPILER_SUPPORTS_AVX2_FLAG)
+      set(OPENJP2_COMPILE_OPTIONS ${OPENJP2_COMPILE_OPTIONS} -mavx2)
+    else()
+      message(WARNING "OPJ_ENABLE_AVX2=ON but compiler does not accept -mavx2")
+    endif()
+  endif()
 endif()
 
 #-----------------------------------------------------------------------------
