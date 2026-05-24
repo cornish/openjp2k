@@ -218,3 +218,70 @@ None. The design is concrete; the implementation is mechanical translation
 of two SSE2 kernels into AVX2 plus call-site coefficient-broadcast tweaks.
 The verification path reuses existing infrastructure (conformance, smoke
 diff-test, archival bench).
+
+---
+
+## Outcome (2026-05-23)
+
+Landed on `feat/sp3-1-avx2-97-lift`. Two commits:
+
+- `25c13698` — AVX2 kernels in `dwt.c` (the lift translation itself).
+- `f38a7779` — `OPJ_ENABLE_AVX2` cmake opt-in (added after measurement
+  surfaced a downstream-reach gap; see below).
+
+### Bench (n=2 archival, n=90 smoke)
+
+| corpus | n | gmean (AVX2 / SSE2) | effect |
+|---|---|---|---|
+| archival (loc-maps lossy 9/7) | 2 | 1.0171 | **+1.71%** |
+| smoke overall (synthetic-iter) | 90 | 1.0129 | +1.29% |
+| smoke lossy 9/7 subset | 33 | 1.0309 | **+3.09%** |
+| smoke lossless 5/3 subset | 57 | 1.0026 | +0.26% (noise; unaffected by SP3.1) |
+
+Decision gate verdict: **PASS (threshold)**. The +3.09% lossy-9/7 subset
+win is the direct measurement of SP3.1's effect on the targeted code
+path. Lossless files use the 5/3 integer DWT (unchanged by SP3.1) and
+the +0.26% gmean confirms no regression there.
+
+Conformance: 8 failures under `OPJ_ENABLE_AVX2=ON` — identical to the
+project baseline. Byte-exactness held against the SSE2 reference.
+
+### Spec deviation — opt-in cmake option, not -march=native gating
+
+The original design specified compile-time `#ifdef __AVX2__` gating,
+assuming `-march=native` (which the bench host uses) would flow through
+to make `__AVX2__` defined. Measurement showed this assumption was wrong
+twice over:
+
+1. **Bench harness gap.** The `openjp2k-bench` `ExternalProject_Add` for
+   `openjp2k_ext` does NOT propagate `-march=native` to the subbuild
+   (the `JP2KBENCH_NATIVE` cmake option is declared but unused). Initial
+   bench runs were SSE2-vs-SSE2 noise (~0.3%). The bench's CMakeLists.txt
+   needs a fix to wire `JP2KBENCH_NATIVE → -DCMAKE_C_FLAGS=-march=native`
+   on the openjp2k subbuild's CMAKE_ARGS. Local patch used for SP3.1
+   measurement; the upstream fix is a bench-team deliverable.
+
+2. **Downstream consumers don't set `-march=native`.** Distributors and
+   package maintainers build for portability (the binary must run on
+   any x86_64 CPU). Without an explicit opt-in, SP3.1 ships as dead code
+   for the majority of consumers.
+
+The fix: `OPJ_ENABLE_AVX2` cmake option (default OFF). Set ON for builds
+targeting AVX2 hosts; appends `-mavx2` to `OPENJP2_COMPILE_OPTIONS`. This
+matches the standard SIMD-opt-in pattern used by libpng, ffmpeg, OpenSSL.
+
+A future SP3.4 (Highway-based runtime dispatch) would obsolete this
+option — runtime CPU detection would pick the right kernel without
+requiring build-time opt-in. The cmake option is the right answer for
+now and removable cleanly when SP3.4 lands.
+
+### Carry-over
+
+- `-march=native` enables FMA + AVX (not just AVX2). Under `-ffast-math`,
+  GCC contracts mul+add into FMA on the 5/3 integer DWT path, producing
+  ±1 LSB rounding deltas (49 conformance failures vs the 8-failure
+  baseline). The cmake option uses `-mavx2` (no FMA), so byte-exactness
+  is preserved at the conformance level.
+- Cumulative project state after SP3.1: D6.5 + D1.0-D1.3 + D6.1-phase-1
+  + SP3.1. Next candidates: D4 (stripe SIMD), D5 (dequant fuse), or
+  SP3.2 (int16 5/3 path).
