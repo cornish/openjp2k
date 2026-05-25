@@ -221,3 +221,86 @@ After implementation:
 If ROI overall improves < +0.5%, the flag isn't reaching the
 workers — investigate before tagging. If full-tile regresses > 0.5%,
 something else changed; revert.
+
+---
+
+## Outcome (2026-05-25)
+
+Landed on `feat/d7-t1-conditional-dispatch` as commit `323ac40c`
+("T1: conditional fast/legacy dispatch on whole-tile-decoding (D7)").
+Single atomic commit, +8/-2 LOC across `src/lib/openjp2/t1.h` and
+`src/lib/openjp2/t1.c`.
+
+### Implementation note — propagation infrastructure already existed
+
+The plan called for four propagation hops (job struct field,
+dispatcher set from `tcd`, worker copy, dispatch AND). Two of these
+(job struct field at `t1.c:1509`, dispatcher set at `t1.c:1886`)
+turned out to be **already wired in `main`** for an unrelated
+purpose: per-codeblock `decoded_data` memory-allocation strategy
+in partial decode. D7 piggybacked on the existing propagation. Only
+the `opj_t1_t` field (`t1.h:210`) + the worker copy
+(`t1.c:1607`) + the dispatch AND (`t1.c:1934`) were new.
+
+### Conformance
+
+- `OPJ_ENABLE_AVX2=ON`: 545/553 pass, exactly the 8 pre-existing
+  NR-DEC-md5 failures — no new mismatches.
+- `OPJ_ENABLE_AVX2=ON` + `OPJ_T1_FAST=0`: same 8 failures (env-var
+  override path intact).
+- AVX2-OFF build: clean.
+- Byte-cmp 3 files × 2 regions × {AVX2-ON, AVX2-OFF}: 6/6 identical.
+
+### Bench (n=90, paired within-run ratios, vs same-day SP3.2 baseline)
+
+| Slice | n | D7 delta | Verdict |
+|---|---:|---:|---|
+| **ROI smoke overall** | 90 | **+2.41%** | EXCEEDS TARGET (≥+1.5%) |
+| **ROI 16-bit lossless** | 19 | **+6.73%** | EXCEEDS TARGET (≥+5%) |
+| ROI 12-bit lossless | 19 | +2.72% | EXCEEDS TARGET (≥+2%) |
+| ROI 8-bit lossless | 19 | +0.71% | PASS (≥+0%) |
+| Full-tile smoke overall | 90 | −0.27% | PASS (±0.5%) |
+| Full-tile 8-bit lossless | 19 | −0.19% | PASS (±0.5%) |
+| Full-tile 16-bit lossless | 19 | −0.20% | PASS (±0.5%) |
+
+All gate rows pass. Closes
+[cornish/openjp2k#3](https://github.com/cornish/openjp2k/issues/3).
+
+### Methodology footnote — same-day baselines matter
+
+The first D7 bench run was compared against the SP3.2 final smoke
+from 2026-05-24 and showed a spurious **−4.51%** overall full-tile
+"regression". A runtime debug print confirmed the dispatch was
+selecting fast=on for full-tile decode (whole_tile_decoding=1)
+exactly as intended, so the regression couldn't be coming from the
+code change. A same-day SP3.2 baseline rebuild + smoke (using a
+fresh worktree of commit `bb8c376e`) showed D7 is actually within
+−0.27% of SP3.2 on full-tile — well within the ±0.5% gate.
+
+The lesson: cross-day environmental drift on this dev host can
+exceed the size of the effect we're measuring. Bench against a
+same-day baseline whenever the predicted effect is in the ±2% range.
+The paired-within-run-ratio methodology (from the SP3.2
+retrospective) cancels intra-run noise but NOT inter-day noise.
+
+### Carry-over
+
+- **Cumulative project state:** v0.8.0 (SP3.2) + D7. Cumulative
+  openjp2k-vs-openjpeg position on the ROI smoke overall improved
+  from −2.48% (SP3.2 baseline) to **+0.06%** (D7) — first time the
+  ROI path matches vanilla openjpeg.
+- **Full-tile 16-bit lossless residue.** The investigation surfaced
+  that legacy is +2.53% better than fast on full-tile 16-bit
+  lossless (only slice where legacy beats fast on full-tile). D7
+  keeps fast there, leaving that win unrealized. Worth its own
+  follow-up — possibly a per-precision sub-dispatch ("fast for
+  prec≤12 full-tile, legacy otherwise"). Open as a future
+  deliverable.
+- **Issue #2 (pathological DICOM J2KR slowdowns)** remains open.
+  D7 doesn't address it directly, but the conditional dispatch
+  might affect J2KR partial decode — worth re-measuring on those
+  6 outlier files when issue #2 is taken up.
+- **`OPJ_T1_FAST` env-var semantics** preserved: `=0` still forces
+  legacy everywhere. Default behavior changes silently from "fast
+  everywhere" to "fast on full-tile, legacy on partial-tile." No
+  visible-API surface change.
