@@ -242,3 +242,117 @@ After implementation:
 
 If ROI 8-bit lossless improves < 0.5%, investigate before tagging. If
 ROI smoke overall regresses > 1%, revert.
+
+---
+
+## Outcome (2026-05-25) — **Negative result, reverted**
+
+Implemented and benched on `feat/sp3-2b-int16-partial-dwt` (commit
+`55ff6ac6`); branch deleted without merging to main after measurement.
+Spec + plan retained on main as a record of the attempt.
+
+### Verification (all passed)
+
+- AVX2-ON and AVX2-OFF builds: clean, no warnings.
+- Conformance `OPJ_ENABLE_AVX2=ON`: 545/553 pass, exactly the 8
+  pre-existing NR-DEC-md5 failures — no new mismatches.
+- Manual byte-cmp (3 files × 3 regions, AVX2-ON vs AVX2-OFF):
+  **9/9 identical.**
+
+The implementation is correct. The problem was performance.
+
+### Bench (ROI smoke, center-50% window, n=90, paired-ratio vs SP3.2 baseline)
+
+Three-way decomposition isolated the contributions. **A** = SP3.2
+baseline (no SP3.2b code in binary). **B** = SP3.2b code in binary but
+dispatch disabled via an investigation env var (int32 partial path
+runs for prec≤8). **C** = SP3.2b shipped (int16 partial path runs for
+prec≤8).
+
+| Slice | n | Icache cost (B/A) | int16 path delta (C/B) | Combined (C/A) |
+|---|---:|---:|---:|---:|
+| Overall | 90 | **−0.99%** | +0.01% | −0.97% |
+| **8-bit lossless** (SP3.2b target) | 19 | **−0.96%** | **+0.27%** | **−0.69%** |
+| 8-bit lossy | 11 | −0.78% | +0.69% | −0.10% |
+| 12-bit lossless | 19 | −0.95% | +0.12% | −0.84% |
+| 12-bit lossy | 11 | −0.55% | −1.31% | −1.85% |
+| **16-bit lossless** | 19 | **−1.41%** | +0.13% | **−1.28%** |
+| 16-bit lossy | 11 | −1.01% | −0.16% | −1.16% |
+
+Decision gate verdict: **FAIL**.
+
+- Target slice (8-bit lossless ROI) gate: ≥+1% pass / ≥+2% target.
+  Actual: −0.69%.
+- Smoke overall tripwire (±1%): actual −0.97%, just inside the revert
+  threshold but in the wrong direction.
+
+### Diagnosis
+
+Two findings, both load-bearing for the decision:
+
+1. **The int16 partial path itself barely helps.** On the 8-bit
+   lossless target slice, switching from int32 to int16 lift in the
+   partial-tile orchestrator delivers only **+0.27%**. The lift cycle
+   savings are nearly cancelled by the per-cblk `int32→int16` pack
+   overhead in `opj_dwt_init_sparse_array_int16` and the conversion
+   round-trip at the boundary. For partial decode, T1 entropy is a
+   larger fraction of total time than DWT — there isn't enough DWT
+   work per resolution to amortize the conversion. Risk #2 in the
+   design was real and dominant.
+
+2. **The icache cost of adding the new code is the dominant negative
+   effect (~−1% uniformly).** Even with the int16 dispatch disabled,
+   merely having the SP3.2b code in the binary regresses every slice
+   by about 1%. The worst-hit slice is **16-bit lossless** at **−1.41%**
+   — a workload (medical CT/MR) SP3.2b doesn't even activate on. This
+   is the SP3.2 cross-slice surprise running in reverse direction:
+   SP3.2 full-tile addition gave a +4% accidental win; SP3.2b partial
+   addition gives a −1% accidental loss. Code layout / icache effects
+   from adding ~1000 LOC to `dwt.c` are real and direction-dependent.
+
+### Why no salvage path is viable
+
+- **Window-size guard (Risk #2's suggested mitigation):** unhelpful.
+  Our 512×512 measurement window is already a generous fraction of
+  the 1024² synthetic tile — if this size doesn't show a win, smaller
+  windows definitely won't.
+- **Even a magically-zero-cost int16 path** would only deliver +0.27%
+  on the target slice — still below the +1% pass threshold. The whole
+  premise (int16 SIMD widening dominates partial-decode wall clock)
+  is wrong for this workload.
+- **Reducing code size to lower icache cost:** the ~990 added LOC are
+  legitimate kernels and the sparse-array surface. Can't shrink
+  meaningfully without losing correctness.
+
+### Action taken
+
+- Branch `feat/sp3-2b-int16-partial-dwt` deleted; commit `55ff6ac6`
+  abandoned. The investigation env-var hack on dwt.c was reverted
+  before deletion.
+- This spec + the implementation plan are retained on main as the
+  archive of the attempt — useful negative result.
+- No tag cut. The project state stays at SP3.2 final
+  (`v0.8.0-sp3-2-int16-53-dwt`).
+
+### Carry-over
+
+- **Partial-decode perf gap is pre-existing and worth its own work.**
+  Even with no SP3.2b code in the binary (sp32_baseline), openjp2k
+  is **−2.48% slower than openjpeg overall** on ROI smoke, with
+  −5.96% on 16-bit lossless. The 5/3 int32 partial path itself
+  has perf headroom unrelated to SIMD widening.
+- **Cross-slice icache effects are real and direction-dependent.**
+  SP3.2 (+4% on untouched slices) and SP3.2b (−1% on untouched slices)
+  are both empirical evidence. Future deliverables that add code to
+  `dwt.c` should expect to measure this effect and may need
+  function-layout / alignment / `OPJ_LOCAL` work to manage it.
+- **Methodology lesson for future SP-style deliverables:** the design
+  spec's "investigate if target < 0.5%" tripwire fired. The three-way
+  decomposition (no-code / code-present-but-disabled / code-active)
+  via an env-var dispatch off-switch is the right pattern for separating
+  icache cost from the active-path delta. Use it whenever the active
+  path is a small fraction of the binary's net change.
+- Next candidates per the SP3 plan: SP3.4 (Highway runtime dispatch —
+  unaffected by this result, still valuable), or a new D-tier deliverable
+  targeted at the partial-path perf gap surfaced here, or pathological
+  J2KR slowdowns (cornish/openjp2k#2).
