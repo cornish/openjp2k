@@ -199,9 +199,14 @@ typedef struct opj_t1 {
     OPJ_UINT32 datasize;
     OPJ_UINT32 flagssize;
 
-    /* The 3 variables below are only used by the decoder */
+    /* The 4 variables below are only used by the decoder */
     /* set to TRUE in multithreaded context */
     OPJ_BOOL     mustuse_cblkdatabuffer;
+    /* Whether the surrounding tile is being whole-tile-decoded;
+     * propagated here from tcd_t.  Gates the fast T1 path in
+     * opj_t1_decode_cblk: fast amortizes on full-tile but its
+     * per-codeblock setup cost dominates on partial-tile. */
+    OPJ_BOOL     whole_tile_decoding;
     /* Temporary buffer to concatenate all chunks of a codebock */
     OPJ_BYTE    *cblkdatabuffer;
     /* Maximum size available in cblkdatabuffer */
