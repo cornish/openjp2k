@@ -1507,6 +1507,7 @@ void opj_t1_destroy(opj_t1_t *p_t1)
 
 typedef struct {
     OPJ_BOOL whole_tile_decoding;
+    OPJ_UINT32 prec;
     OPJ_UINT32 resno;
     opj_tcd_cblk_dec_t* cblk;
     opj_tcd_band_t* band;
@@ -1605,6 +1606,7 @@ static void opj_t1_clbl_decode_processor(void* user_data, opj_tls_t* tls)
     }
     t1->mustuse_cblkdatabuffer = job->mustuse_cblkdatabuffer;
     t1->whole_tile_decoding = job->whole_tile_decoding;
+    t1->prec = job->prec;
 
     if ((tccp->cblksty & J2K_CCP_CBLKSTY_HT) != 0) {
         if (OPJ_FALSE == opj_t1_ht_decode_cblk(
@@ -1883,6 +1885,8 @@ void opj_t1_decode_cblks(opj_tcd_t* tcd,
                         *pret = OPJ_FALSE;
                         return;
                     }
+                    assert(tilec->compno < tcd->image->numcomps);
+                    job->prec = tcd->image->comps[tilec->compno].prec;
                     job->whole_tile_decoding = tcd->whole_tile_decoding;
                     job->resno = resno;
                     job->cblk = cblk;
@@ -1931,7 +1935,9 @@ static OPJ_BOOL opj_t1_decode_cblk(opj_t1_t *t1,
     OPJ_UINT32 cblkdataindex = 0;
     OPJ_BYTE type = T1_TYPE_MQ; /* BYPASS mode */
     OPJ_INT32* original_t1_data = NULL;
-    int use_fast = opj_t1_fast_enabled() && t1->whole_tile_decoding;
+    int use_fast = opj_t1_fast_enabled()
+                   && t1->whole_tile_decoding
+                   && t1->prec <= 12;
 
     mqc->lut_ctxno_zc_orient = lut_ctxno_zc + (orient << 9);
 
