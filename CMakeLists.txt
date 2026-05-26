@@ -166,7 +166,18 @@ if(CMAKE_COMPILER_IS_GNUCC)
   # set(CMAKE_C_FLAGS "-Wall -std=c99 ${CMAKE_C_FLAGS}") # FIXME: this setting prevented us from setting a coverage build.
   # Do not use ffast-math for all build, it would produce incorrect results, only set for release:
   set(OPENJPEG_LIBRARY_COMPILE_OPTIONS ${OPENJPEG_LIBRARY_COMPILE_OPTIONS} "$<$<CONFIG:Release>:-ffast-math>")
-  set(OPENJP2_COMPILE_OPTIONS ${OPENJP2_COMPILE_OPTIONS} "$<$<CONFIG:Release>:-ffast-math>" -Wall -Wextra -Wconversion -Wunused-parameter -Wdeclaration-after-statement -Werror=declaration-after-statement -Wstrict-prototypes -Werror=strict-prototypes -Wmissing-prototypes -Werror=missing-prototypes)
+  # SP-2.1a: with OPJ_ENABLE_TASK_GRAPH=ON, task_graph.cpp is compiled
+  # alongside the C sources.  The C-only warning flags
+  # (-Wdeclaration-after-statement, -Wstrict-prototypes, -Wmissing-prototypes)
+  # are gated behind $<COMPILE_LANGUAGE:C> so they are not passed to cc1plus,
+  # which would otherwise emit "valid for C/ObjC but not for C++" notices.
+  set(OPENJP2_COMPILE_OPTIONS ${OPENJP2_COMPILE_OPTIONS} "$<$<CONFIG:Release>:-ffast-math>" -Wall -Wextra -Wconversion -Wunused-parameter
+      "$<$<COMPILE_LANGUAGE:C>:-Wdeclaration-after-statement>"
+      "$<$<COMPILE_LANGUAGE:C>:-Werror=declaration-after-statement>"
+      "$<$<COMPILE_LANGUAGE:C>:-Wstrict-prototypes>"
+      "$<$<COMPILE_LANGUAGE:C>:-Werror=strict-prototypes>"
+      "$<$<COMPILE_LANGUAGE:C>:-Wmissing-prototypes>"
+      "$<$<COMPILE_LANGUAGE:C>:-Werror=missing-prototypes>")
   # SP3.1: opt-in AVX2 for the 9/7 float IDWT lift.  Default OFF for
   # portability: enabling adds -mavx2 to the openjp2 compile flags, which
   # produces a binary that requires an AVX2-capable CPU at runtime.  Set

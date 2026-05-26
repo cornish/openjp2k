@@ -86,6 +86,37 @@ if(OPJ_T1_LEGACY_ONLY)
   add_definitions(-DOPJ_T1_LEGACY_ONLY)
 endif()
 
+# SP-2.1a: opt-in Taskflow-based DAG decoder orchestration.  Default ON.
+# When ON, task_graph.cpp is compiled as C++17 and the produced library
+# links libstdc++.  When OFF, the library remains pure C with no C++
+# runtime dependency.  The new module is gated by the OPJ_ENABLE_TASK_GRAPH
+# preprocessor define and is opaque at the C ABI boundary.
+option(OPJ_ENABLE_TASK_GRAPH
+       "Build openjp2 with the Taskflow-based DAG decoder orchestration (requires C++17 + libstdc++)"
+       ON)
+if(OPJ_ENABLE_TASK_GRAPH)
+  enable_language(CXX)
+  set(CMAKE_CXX_STANDARD 17)
+  set(CMAKE_CXX_STANDARD_REQUIRED ON)
+  set(OPENJPEG_SRCS
+    ${OPENJPEG_SRCS}
+    ${CMAKE_CURRENT_SOURCE_DIR}/task_graph.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/task_graph.h
+  )
+  set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/task_graph.cpp
+    PROPERTIES LANGUAGE CXX
+               # Suppress warnings on this file:
+               # 1. C-only flags (-Wdeclaration-after-statement, -Wstrict-prototypes,
+               #    -Wmissing-prototypes) from OPENJP2_COMPILE_OPTIONS produce cc1plus
+               #    notices when applied to a C++ source.
+               # 2. Taskflow is vendored third-party and trips -Wconversion warnings
+               #    in observer.hpp / etc.
+               # The wrapper itself is small (~90 LOC) and reviewed manually.
+               COMPILE_FLAGS "-w")
+  add_definitions(-DOPJ_ENABLE_TASK_GRAPH)
+  include_directories(${OPENJPEG_SOURCE_DIR}/third_party)
+endif()
+
 # Special case for old i586-mingw32msvc-gcc cross compiler
 if(NOT WIN32 AND CMAKE_COMPILER_IS_GNUCC AND CMAKE_C_COMPILER MATCHES ".*mingw32msvc.*" )
   set(WIN32 YES)
