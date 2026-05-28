@@ -70,6 +70,35 @@ short-circuit work outside the requested region; we should. Likewise,
 single-component decode (common in DICOM monochrome and in WSI tile
 pipelines) has optimization headroom vanilla doesn't bother with.
 
+### SIMD: intrinsics first, asm only when profile demands it
+
+Default to compiler intrinsics (`<immintrin.h>` for AVX2, `<arm_neon.h>`
+for NEON, etc.) for new SIMD work. Existing code in `dwt.c`, `mqc.c`,
+and the SP3.x / D8 deliverables follows this pattern. Intrinsics keep
+the SIMD readable, let the compiler schedule registers, and stay
+portable across GCC and clang.
+
+Hand-rolled inline asm should only land when **profile data proves
+intrinsic-generated code is provably suboptimal** for the
+microarchitecture target. Realistic warrant cases:
+
+- Very small (<20 instruction) inner loops where compiler scheduling
+  leaves measurable cycles on the table.
+- ISA features intrinsics don't expose (e.g., specific BMI2
+  operand orderings).
+- Cross-compiler portability when GCC and clang generate materially
+  different code for the same intrinsics.
+
+Each of those should be documented in the commit message (which
+microarchitecture, which compiler version, what the profile showed)
+so a future contributor knows why intrinsics weren't enough.
+
+Runtime CPU dispatch across multiple SIMD targets (NEON / AVX2 /
+AVX-512 / SVE2) is better served by [Highway](https://github.com/google/highway)
+than hand-rolled asm + dispatch glue. SP-3.4 on the roadmap is the
+right home for that work; see
+`docs/superpowers/specs/2026-05-16-decode-perf-design.md` §4.4.
+
 ## Upstream tracking
 
 ```sh
