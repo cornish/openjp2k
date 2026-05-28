@@ -408,3 +408,132 @@ workloads. Failed SP-2.1 (no measurable gain) means single-threaded
 parity remains the project's ceiling — at which point SP-2.2 and the
 roadmap's cloud / random-access sub-projects become more attractive
 relative to in-tile threading.
+
+---
+
+## SP-2.1a Outcome (2026-05-27) — Task 1 landed, Task 2 reverted, SP-2 thesis refined
+
+SP-2.1a's plan was decomposed into:
+- **Task 1**: vendor Taskflow + add C-ABI `task_graph` module (no callers).
+- **Task 2**: route per-cblk / per-row jobs through Taskflow's executor as a flat parallel soup.
+- **Task 3**: bench gate.
+
+**What landed (`v0.11.0-sp2-1a-task-graph-infra`):**
+
+Only Task 1. Commit `e8b2f2cc` — Taskflow vendored at `third_party/taskflow/` (v3.7.0, ~21,960 LOC, MIT), C-ABI module `task_graph.{h,cpp}` (~150 LOC), CMake gated by `OPJ_ENABLE_TASK_GRAPH` (default ON). **The module is unreferenced from production code.** When `OPJ_ENABLE_TASK_GRAPH=OFF`, the library is pure C with no libstdc++ dependency.
+
+**What was experimented and reverted (Task 2):**
+
+Task 2 swapped the dispatch sites in `t1.c` and `dwt.c` from
+`opj_thread_pool_submit_job` to `opj_tcd_dispatch_job` (which routed
+through Taskflow's executor when `OPJ_DAG=1`). Per-worker TLS array
+on `opj_tcd_t` mirrored the legacy pool's TLS-per-worker pattern.
+
+Initial perf hit: −6.8% at t=1 on a 12-bit lossy test file. Profiled:
+glibc's `fwrite` (in `opj_decompress`'s output writer) shifted onto
+the thread-safe locking path because the Taskflow executor spawned
+worker threads, making the process multi-threaded. Fix: skip
+`task_graph` creation when `pool_threads <= 1`. That closed the t=1
+regression entirely (gap dropped from −6.8% to within noise).
+
+Full bench gate (iter @ t=1,2,4,8 vs same-day D7.1 baseline):
+
+| t | n | SP-2.1a Task 2 delta | head vs openjpeg |
+|---|---:|---:|---:|
+| 1 | 308 | +0.46% | −0.31% (parity) |
+| 2 | 308 | **−1.56%** | −1.85% |
+| 4 | 308 | **−1.97%** | −2.30% |
+| **8** | **308** | **−8.32%** | **−12.35%** |
+
+Worst slices at t=8: medical **−31.54%**, 12-bit lossy −11.06%,
+conformance −7.30%. Gap vs grok at t=8 *widened* from −19.42% to
+−23.46%.
+
+Diagnosis: Taskflow's executor has higher per-task overhead than
+`opj_thread_pool` on the per-cblk dispatch hot path. Without DAG
+edges (the value proposition of Taskflow), the swap is pure
+overhead. Decision: revert Task 2, document the negative result,
+defer to a future deliverable informed by better measurements.
+
+### SP-2.0 follow-up profile — openjp2k vs grok on the worst-gap slice
+
+After reverting Task 2, profiled the 8-bit lossy worst-case file
+(`pCPRL_d1_b32_t1024x1024_lossy_l1_moff_esop_eph.jp2`, where grok's
+SP-2.0 lead was −44%) at both t=1 and t=8.
+
+| Decoder | t=1 (ms) | t=8 (ms) | t=1→t=8 speedup |
+|---|---:|---:|---:|
+| openjpeg | 13.32 | 9.82 | 1.36× |
+| openjp2k | 13.93 | 9.57 | 1.46× |
+| **grok** | **11.87** | **6.23** | **1.91×** |
+
+**Grok's lead decomposes ~50/50:**
+- At t=1: grok is **17% faster** than openjp2k — pure single-thread architectural advantage (per-cblk cost, memory layout, inner loops).
+- At t=8: grok is **35% faster** — the additional **18 pp** is MT scheduling efficiency.
+
+If we matched grok's MT scaling (1.91× vs our 1.46×), we'd close
+~half the gap. The remaining half is intrinsic per-stage / per-cblk
+work where grok is structurally faster.
+
+**Hot-function profile (merged 3-decoder run at t=1):**
+
+| Symbol | DSO | % | Notes |
+|---|---|---:|---|
+| `opj_t1_fast_dec_sigpass_mqc` | openjp2k | 10.97% | T1 |
+| `grk::BlockCoder::dec_sigpass` | grok | 10.79% | T1 |
+| `opj_t1_dec_sigpass_mqc_generic` | openjpeg | 10.25% | T1 |
+| `opj_tcd_decode_tile` | openjpeg | **9.72%** | orchestration |
+| `opj_tcd_decode_tile` | openjp2k | **9.02%** | orchestration |
+| `opj_t1_dec_clnpass_fast_generic_novsc` | openjp2k | 7.32% | T1 |
+| `grk::BlockCoder::dec_clnpass` | grok | 7.26% | T1 |
+| `opj_t1_dec_clnpass_generic_novsc` | openjpeg | 6.99% | T1 |
+
+**Two unexpected findings:**
+
+1. **T1 inner-loop fractions are essentially equal** across all
+   three decoders (~17-19% of each decoder's runtime). T1 is NOT
+   where grok wins. Our prior assumption that "grok has a faster
+   inner loop" is wrong — they're competitive on raw T1.
+
+2. **`opj_tcd_decode_tile` is 9% of openjp2k's runtime** vs grok's
+   equivalent orchestration (`vscheduler16` 0.86% + `postProcessBlock`
+   0.87% ≈ 2%). That's a **~7 percentage point gap** in per-tile
+   orchestration overhead. This is likely the biggest single-thread
+   architectural difference.
+
+### Implications for SP-2 going forward
+
+1. **SP-2.1 (per-tile DAG via Taskflow) as currently spec'd is the
+   wrong shape.** Taskflow can't earn its per-cblk dispatch overhead.
+   A coarser-grained DAG (one task per stage, not one per cblk) might
+   work — leave `opj_thread_pool` for the per-cblk fast path, use
+   Taskflow only at inter-stage edges. Spec rewrite needed.
+
+2. **SP-2.2 (cross-tile pipelining) is now the higher-confidence MT
+   lever.** It would address the 18-pp MT scaling gap by overlapping
+   tile boundaries.
+
+3. **A new investigation is the highest-leverage immediate target:
+   the `opj_tcd_decode_tile` 7-pp orchestration gap.** This is
+   single-threaded code; visible at both t=1 and t=8; smaller scope
+   than any SP-2 architectural rewrite. Worth a focused profile +
+   targeted fix experiment before committing more multi-week MT work.
+
+4. **Honest project-level claim:** single-thread parity with
+   openjpeg is real. Multi-thread is at-or-below openjpeg and ~20-23%
+   behind grok. Closing the grok gap requires both the per-stage
+   orchestration win (one finding here) AND MT scheduling
+   improvements (SP-2.2 territory).
+
+### Files / commits
+
+- Branch: `feat/sp2-1a-task-graph-infrastructure` at `e8b2f2cc`
+  (Task 1 only after revert).
+- Reflog reference: `46dee1de` — the Task 2 commit, reachable for
+  archaeology if needed but not on any branch.
+- Bench JSONLs: `sp2_0_mt_scaling_*`, `sp2_0_t8_fresh_*`,
+  `sp2_1a_iter_baseline_*`, `sp2_1a_iter_head_*` in
+  `openjp2k-bench/results/`.
+- Profile data: `/tmp/perf_st.data` (t=1, 3 decoders interleaved),
+  `/tmp/perf_mt.data` (t=8 equivalent). Re-record from the bench
+  if perf data is ever needed again — bench config in this outcome.
