@@ -39,8 +39,16 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
+#define OPJ_SKIP_POISON
 #include "opj_includes.h"
-#include "opj_common.h"
+
+#ifdef __AVX2__
+#include <immintrin.h>
+#endif
+
+#if defined(__GNUC__)
+#pragma GCC poison malloc calloc realloc free
+#endif
 
 // #define DEBUG_RATE_ALLOC
 
@@ -2349,6 +2357,67 @@ static OPJ_BOOL opj_tcd_mct_decode(opj_tcd_t *p_tcd, opj_event_mgr_t *p_manager)
 }
 
 
+#ifdef __AVX2__
+/* AVX2 inner loop for the float-path branch of
+ * opj_tcd_dc_level_shift_decode (used by 9/7 lossy decode).
+ *
+ * Equivalence to the scalar:
+ *   pre-clamp float to [(float)(lmin-dc_shift), (float)(lmax-dc_shift)]
+ *   _mm256_cvtps_epi32 (MXCSR rounding; default round-to-nearest-even
+ *                       matches opj_lrintf semantics)
+ *   add dc_shift as int32 (no overflow: pre-clamp keeps the result
+ *                          in [lmin, lmax] post-add)
+ *   store
+ *
+ * Eight pixels per iteration; scalar tail handles the remaining <8.
+ * The pre-clamp absorbs the scalar's three branches (>INT_MAX,
+ * <INT_MIN, in-range) into a single min/max because for any
+ * reasonable JP2K dc_shift (<= +/-32768 for 16-bit prec), the
+ * float-domain pre-clamp bounds are exactly representable in IEEE-754
+ * single precision and the post-add result is identical to the
+ * scalar's three-branch dispatch. */
+static void opj_tcd_dc_level_shift_decode_float_avx2(
+    OPJ_INT32* data,
+    OPJ_UINT32 width,
+    OPJ_UINT32 height,
+    OPJ_UINT32 stride,
+    OPJ_INT32 dc_shift,
+    OPJ_INT32 lmin,
+    OPJ_INT32 lmax)
+{
+    const __m256 vfmin = _mm256_set1_ps((float)lmin - (float)dc_shift);
+    const __m256 vfmax = _mm256_set1_ps((float)lmax - (float)dc_shift);
+    const __m256i vdc  = _mm256_set1_epi32(dc_shift);
+    OPJ_UINT32 j;
+
+    for (j = 0; j < height; ++j) {
+        OPJ_INT32* row = data + (OPJ_SIZE_T)j * (width + stride);
+        OPJ_UINT32 i = 0;
+        for (; i + 8 <= width; i += 8) {
+            __m256 v;
+            __m256i vi;
+            v = _mm256_loadu_ps((const float*)(row + i));
+            v = _mm256_min_ps(_mm256_max_ps(v, vfmin), vfmax);
+            vi = _mm256_cvtps_epi32(v);
+            vi = _mm256_add_epi32(vi, vdc);
+            _mm256_storeu_si256((__m256i*)(row + i), vi);
+        }
+        /* Scalar tail: <8 remaining pixels on this row. */
+        for (; i < width; ++i) {
+            OPJ_FLOAT32 v = *((OPJ_FLOAT32*)(row + i));
+            if (v > (OPJ_FLOAT32)INT_MAX) {
+                row[i] = lmax;
+            } else if (v < INT_MIN) {
+                row[i] = lmin;
+            } else {
+                OPJ_INT64 vi64 = (OPJ_INT64)opj_lrintf(v);
+                row[i] = (OPJ_INT32)opj_int64_clamp(vi64 + dc_shift, lmin, lmax);
+            }
+        }
+    }
+}
+#endif /* __AVX2__ */
+
 static OPJ_BOOL opj_tcd_dc_level_shift_decode(opj_tcd_t *p_tcd)
 {
     OPJ_UINT32 compno;
@@ -2417,6 +2486,11 @@ static OPJ_BOOL opj_tcd_dc_level_shift_decode(opj_tcd_t *p_tcd)
                 l_current_ptr += l_stride;
             }
         } else {
+#ifdef __AVX2__
+            opj_tcd_dc_level_shift_decode_float_avx2(
+                l_current_ptr, l_width, l_height, l_stride,
+                l_tccp->m_dc_level_shift, l_min, l_max);
+#else
             for (j = 0; j < l_height; ++j) {
                 for (i = 0; i < l_width; ++i) {
                     OPJ_FLOAT32 l_value = *((OPJ_FLOAT32 *) l_current_ptr);
@@ -2434,6 +2508,7 @@ static OPJ_BOOL opj_tcd_dc_level_shift_decode(opj_tcd_t *p_tcd)
                 }
                 l_current_ptr += l_stride;
             }
+#endif
         }
     }
 
