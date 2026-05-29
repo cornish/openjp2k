@@ -20,7 +20,7 @@ All intermediate state is `int16_t` in Q1.15. The single multiply
 primitive is rounding multiply-high:
 
 ```
-mf15(a, b) = (int16_t)(((int32_t)a * (int32_t)b + (1 << 14)) >> 15)
+opj_q15_mul(a, b) = (int16_t)(((int32_t)a * (int32_t)b + (1 << 14)) >> 15)
 ```
 
 This is the scalar form of `_mm256_mulhrs_epi16` (x86 VPMULHRSW) and
@@ -68,11 +68,11 @@ encouraged for clarity but yields the same numbers.
 The four synthesis steps each use a different strategy:
 
 ### Step 3 — undo δ (sum-first)
-`S[n] -= mf15(D[n-1] + D[n], δ_q15)`
+`S[n] -= opj_q15_mul(D[n-1] + D[n], δ_q15)`
 Direct Q1.15. Neighbors are summed in int16 before the multiply.
 
 ### Step 2 — undo γ (sum-first)
-`D[n] -= mf15(S[n-1] + S[n+1], γ_q15)`
+`D[n] -= opj_q15_mul(S[n-1] + S[n+1], γ_q15)`
 Same pattern as step 3.
 
 ### Step 1 — undo β (multiply-first, precision-boosted)
@@ -82,7 +82,7 @@ magnitude. Two consequences:
 - **Precision boost:** encode β × 8 instead of β. Multiply each
   neighbor separately, sum the two products, add rounding offset
   4, then right-shift by 3 to cancel the ×8:
-  `S[n] += (mf15(D[n-1], β8_q15) + mf15(D[n], β8_q15) + 4) >> 3`
+  `S[n] += (opj_q15_mul(D[n-1], β8_q15) + opj_q15_mul(D[n], β8_q15) + 4) >> 3`
 - **Multiply-first:** because each neighbor is multiplied
   separately, no int16 sum-overflow risk at this step. This step
   is *not* counted in BIBO sum-first headroom (§4).
@@ -93,15 +93,15 @@ magnitude. Two consequences:
 
 ```
 sum  = S[n-1] + S[n+1]              # int16
-frac = mf15(sum, α_frac_q15)
+frac = opj_q15_mul(sum, α_frac_q15)
 D[n] = D[n] + sum + frac
 ```
 
 This is sum-first (the sum is formed once and used twice).
 
 ### K and 1/K scaling — fused into interleave
-`x × K   = x + mf15(x, (K − 1)_q15)`
-`x × 2/K = x + mf15(x, (2/K − 1)_q15)`
+`x × K   = x + opj_q15_mul(x, (K − 1)_q15)`
+`x × 2/K = x + opj_q15_mul(x, (2/K − 1)_q15)`
 
 Applied while gathering each subband row/column from the strided
 band buffer into the contiguous scratch buffer (even samples scaled
@@ -172,7 +172,7 @@ The horizontal and vertical scalar kernels share this skeleton
    For i = parity, parity+2, … < height:
      d_prev = (i > 0)            ? scratch[i-1] : scratch[i+1]
      d_next = (i + 1 < height)   ? scratch[i+1] : scratch[i-1]
-     scratch[i] -= mf15(d_prev + d_next, δ_q15)
+     scratch[i] -= opj_q15_mul(d_prev + d_next, δ_q15)
 
 3. STEP 2 (undo γ): every odd position — same shape as Step 3,
    using γ_q15.
@@ -180,14 +180,14 @@ The horizontal and vertical scalar kernels share this skeleton
 4. STEP 1 (undo β, precision-boosted, multiply-first):
    For i = parity, parity+2, … < height:
      d_prev / d_next as above
-     prod = mf15(d_prev, β8_q15) + mf15(d_next, β8_q15) + 4
+     prod = opj_q15_mul(d_prev, β8_q15) + opj_q15_mul(d_next, β8_q15) + 4
      scratch[i] += (prod >> 3)
 
 5. STEP 0 (undo α, additive): every odd position
    For i = 1-parity, …  < height:
      s_prev / s_next as above
      sum  = s_prev + s_next
-     frac = mf15(sum, α_frac_q15)
+     frac = opj_q15_mul(sum, α_frac_q15)
      scratch[i] += sum + frac
 
 6. SCATTER phase: write scratch[i] back to dest[i * strideDest]
@@ -232,7 +232,7 @@ and the equivalent rounding multiply on RISC-V V.
 For an AVX2 implementation in openjp2k:
 - 16 lanes of int16 per `__m256i` (vs 8 lanes int32 in the float
   path) — doubles per-vector throughput on horizontal rows.
-- `_mm256_mulhrs_epi16` is the direct equivalent of `mf15`.
+- `_mm256_mulhrs_epi16` is the direct equivalent of `opj_q15_mul`.
 - Sum-first steps require care: the int16 add `_mm256_add_epi16`
   saturates by default in some intrinsics but the unsaturated
   add is what we want here; the headroom analysis ensures no
