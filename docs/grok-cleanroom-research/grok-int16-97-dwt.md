@@ -221,6 +221,66 @@ component's pixel buffer.
 For signed input, `dc_shift = 0` and `dc_min`/`dc_max` are the
 signed range. We do not currently target signed input for this path.
 
+## 7.5 Float→int16 input mapping (openjp2k-specific)
+
+Grok's pipeline uses a `NarrowShiftFilter` band-by-band after T1 that
+converts int32 T1 output directly into int16 with the right-shift+clamp
+needed for headroom (see `grok-performance-innovations.md` §5.2). The
+9/7 IDWT therefore consumes int16 subband data with no float
+intermediate.
+
+openjp2k's 9/7 pipeline is structurally different. T1 (`t1.c`) emits
+int32 raw coefficients; dequantization in `tcd.c` multiplies by
+`band->stepsize` and stores the float32 result back into
+`tilec->data` (which is `OPJ_INT32*` storage holding reinterpreted
+float32 bits — this is how `opj_dwt_decode_tile_97` reads it). The
+int16 9/7 path is bolted on at the entry to `opj_dwt_decode_real`,
+*after* T1 + dequant, so the input is already float.
+
+The pack helper for openjp2k therefore converts float-domain
+`tilec->data` to int16 directly:
+
+```
+int16_value = saturate_int16(lrintf(float_value)) >> headroom_downshift
+```
+
+Three points on this:
+
+**The int16 sample is integer-scale, not Q1.15.** Q1.15 applies only to
+the *coefficients* (Q15_DELTA, Q15_GAMMA, etc.). For an integer-scale
+sample `a` and Q1.15 coefficient `c_q15 = round(c · 2^15)`, the
+primitive `opj_q15_mul(a, c_q15)` computes `round(a · c)` — exactly
+the integer-scale result the lift wants. The pack does NOT scale by
+2^15; that would overflow immediately.
+
+**`lrintf` rounds to nearest (banker's-round-even mode by default).**
+The single-instruction AVX2 form is `_mm256_cvtps_epi32` after a
+saturating-pack to int16 via `_mm256_packs_epi32`. Match the SP-3.2
+pack helper's structure — same intrinsic chain, with `cvtps_epi32`
+inserted before the pack.
+
+**Magnitude bound for prec ≤ 12 unsigned non-MCT.** Post-T1 dequant
+float magnitudes are bounded by approximately `2^(prec-1)` worst-case
+(pixel-space integer-valued before DC shift), so:
+
+| prec | max post-T1 magnitude | BIBO × sum-first peak (3.8×) | fits int16? |
+|---|---|---|---|
+| 8  | 128  | 487  | yes, large margin |
+| 10 | 512  | 1946 | yes, large margin |
+| 12 | 2048 | 7782 | yes, 4× margin   |
+
+**`headroom_downshift = 0` is sufficient for all prec ≤ 12** in the
+non-MCT unsigned case Task 1a targets. The mechanism's plumbing
+should still exist in the orchestrator (parameter on pack/unpack;
+left-shift before the final DC-shift+clamp) so the path can be
+extended later to MCT or higher precision without re-architecture,
+but at prec ≤ 12 it's a no-op.
+
+If empirical PSNR testing on 12-bit lossy content shows < 60 dB on
+any file, try `headroom_downshift = 1` for prec ∈ {11, 12} as a
+first remediation before deeper investigation. This is the conservative
+fallback grok's per-precision table allows for at 12-bit.
+
 ## 8. SIMD notes
 
 Grok's vertical pass is scalar; only the horizontal pass is SIMD.
