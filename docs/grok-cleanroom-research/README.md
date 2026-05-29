@@ -93,7 +93,22 @@ behind it. Useful for deciding whether openjp2k should:
 Includes a summary table of API subsystems with per-subsystem
 "keep / redesign" recommendations.
 
-### 4. `grok-conformance-and-benchmarks.md` (~2,100 words)
+### 4. `grok-int16-97-dwt.md` (~1,800 words) — SP-3.5 supplement
+
+Operational detail for the 16-bit fixed-point 9/7 inverse DWT,
+supplementing §5.5 of `grok-performance-innovations.md`. Written
+2026-05-28 to support SP-3.5 spec revision. Covers Q1.15 primitive,
+exact coefficient encodings (mechanical from T.800), per-step
+decomposition strategies (additive for α/K/2/K, ×8/>>3 precision
+boost for β, sum-first vs multiply-first), BIBO headroom downshift
+table, eligibility gates, scalar 1D synthesis skeleton with edge
+handling, fused DC-shift/clamp at final level, and SIMD notes.
+
+Concludes with a §9 listing the SP-3.5 spec corrections this
+research implies (drop Q5.11 → Q1.15; drop the broken `MULHRS_Q14`
+macro; adopt additive decomposition; add headroom plumbing).
+
+### 5. `grok-conformance-and-benchmarks.md` (~2,100 words)
 
 How Grok verifies correctness and measures performance:
 
