@@ -42,6 +42,18 @@ target_include_directories(test_mqc_packed_equivalence PRIVATE
     ${CMAKE_SOURCE_DIR}/src/lib/openjp2)
 add_test(NAME mqc_packed_equivalence COMMAND test_mqc_packed_equivalence)
 
+# SP-3.5: PSNR verification for the int16 Q1.15 9/7 IDWT path.
+# Registered only when AVX2 is enabled (the int16 path is AVX2-gated)
+# and OPJ_DATA_ROOT is set (the test files come from the corpus).
+if(OPJ_ENABLE_AVX2 AND OPJ_DATA_ROOT)
+    add_executable(test_dwt_int16_97_psnr test_dwt_int16_97_psnr.c)
+    target_link_libraries(test_dwt_int16_97_psnr openjp2 m)
+    target_include_directories(test_dwt_int16_97_psnr PRIVATE
+        ${CMAKE_SOURCE_DIR}/src/lib/openjp2)
+    add_test(NAME sp3_5_psnr
+             COMMAND test_dwt_int16_97_psnr ${OPJ_DATA_ROOT})
+endif()
+
 # Tiny diff-test subset: 10 files, runs in <30s. Larger sweeps are
 # invoked via scripts/run_diff_test.sh outside ctest.
 # Bash-only: skip on Windows (the wrapper is a POSIX shell script).

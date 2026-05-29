@@ -14,6 +14,7 @@
  * Copyright (c) 2007, Jonathan Ballard <dzonatas@dzonux.net>
  * Copyright (c) 2007, Callum Lerwick <seg@haxxed.com>
  * Copyright (c) 2017, IntoPIX SA <support@intopix.com>
+ * Copyright (c) 2026, Toby Cornish (openjp2k modifications)
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -154,6 +155,20 @@ static OPJ_BOOL opj_dwt_decode_tile_int16(opj_thread_pool_t* tp,
         opj_tcd_tilecomp_t* tilec,
         OPJ_UINT32 numres);
 #endif
+
+/* SP-3.5: int16 Q1.15 9/7 path, AVX2 only. */
+#ifdef __AVX2__
+static OPJ_BOOL opj_dwt_decode_tile_97_int16(opj_thread_pool_t* tp,
+        opj_tcd_tilecomp_t* tilec,
+        OPJ_UINT32 numres,
+        OPJ_UINT32 prec);
+#endif
+
+/* SP-3.5 test override: when nonzero, force the float 9/7 path even when
+ * the int16 gate would otherwise dispatch.  Default 0.  Used by the
+ * PSNR verification test to obtain a reference output in the same
+ * process. */
+int opj_dwt_force_float_97 = 0;
 
 static OPJ_BOOL opj_dwt_decode_partial_tile(
     opj_tcd_tilecomp_t* tilec,
@@ -772,6 +787,22 @@ static void opj_idwt53_h(const opj_dwt_t *dwt,
 
 #define VREG_S16_INT_COUNT  16
 #define PARALLEL_COLS_53_S16 (2 * VREG_S16_INT_COUNT)  /* 32 columns per v-pass */
+
+/* SP-3.5: Q1.15 mirror macros and constants for the 9/7 IDWT.  Intermediate
+ * state is int16 with the *coefficients* in Q1.15; samples themselves are
+ * integer-scale (cleanroom §7.5).  Coefficients with |c| >= 1 (alpha, K,
+ * 2/K) use additive decomposition; only |c| < 1 fractional parts go
+ * through the mulhrs primitive. */
+#define MULHRS_Q15(a, b)  _mm256_mulhrs_epi16((a), (b))
+
+/* Q1.15 encodings (round(c * 2^15)) of the standard T.800 Annex F lift
+ * coefficients.  Values are mechanical consequences of the standard. */
+#define Q15_DELTA      ((int16_t)14533)   /* +0.443507  */
+#define Q15_GAMMA      ((int16_t)28931)   /* +0.882911  */
+#define Q15_BETA8      ((int16_t)13890)   /* +0.423841 = 8 * 0.052980  */
+#define Q15_ALPHA_F    ((int16_t)19205)   /* |alpha| - 1 = 0.586134    */
+#define Q15_K_F        ((int16_t) 7542)   /* K - 1     = 0.230174      */
+#define Q15_INVK_F     ((int16_t)20506)   /* 2/K - 1   = 0.625732      */
 #endif /* __AVX2__ */
 
 #ifdef __AVX2__
@@ -3244,6 +3275,636 @@ static OPJ_BOOL opj_dwt_decode_tile_int16(opj_thread_pool_t* tp,
     return OPJ_TRUE;
 }
 
+/* -----------------------------------------------------------------------
+ * SP-3.5: AVX2 int16 Q1.15 kernels for the 9/7 IDWT
+ *
+ * Intermediate state lives in an int16 scratch buffer sized to tilec->data.
+ * The lift uses Q1.15 *coefficients* (mulhrs primitive) with integer-scale
+ * samples (see cleanroom doc §7.5).  Coefficients |c| >= 1 (alpha, K, 2/K)
+ * use additive decomposition.  beta uses a x8/>>3 precision boost.
+ * ----------------------------------------------------------------------- */
+
+/* SP-3.5: float32 (reinterpreted from OPJ_INT32 storage of tilec->data) ->
+ * int16.  Applies a Q-format precision_boost (left-shift in float space)
+ * before lrintf to preserve fractional precision of the dequantized
+ * subband samples, then an optional headroom_downshift.  The
+ * precision_boost is reversed at emit (float multiply by 2^-boost).
+ * Each bit of precision_boost yields ~6 dB PSNR. */
+static void opj_dwt_pack_int32_to_int16_q15(int16_t* OPJ_RESTRICT dst,
+        const OPJ_INT32* OPJ_RESTRICT src,
+        OPJ_SIZE_T n,
+        int precision_boost,
+        int headroom_downshift)
+{
+    const float* OPJ_RESTRICT fsrc = (const float*)src;
+    const __m256 boost = _mm256_set1_ps((float)(1 << precision_boost));
+    const float boost_s = (float)(1 << precision_boost);
+    OPJ_SIZE_T i = 0;
+    if (headroom_downshift == 0) {
+        for (; i + 16 <= n; i += 16) {
+            __m256 lo_f = _mm256_mul_ps(_mm256_loadu_ps(fsrc + i), boost);
+            __m256 hi_f = _mm256_mul_ps(_mm256_loadu_ps(fsrc + i + 8), boost);
+            __m256i lo = _mm256_cvtps_epi32(lo_f);
+            __m256i hi = _mm256_cvtps_epi32(hi_f);
+            __m256i packed = _mm256_packs_epi32(lo, hi);
+            packed = _mm256_permute4x64_epi64(packed, 0xD8);
+            _mm256_storeu_si256((__m256i*)(dst + i), packed);
+        }
+        for (; i < n; ++i) {
+            long v = opj_lrintf(fsrc[i] * boost_s);
+            if (v > INT16_MAX) {
+                v = INT16_MAX;
+            } else if (v < INT16_MIN) {
+                v = INT16_MIN;
+            }
+            dst[i] = (int16_t)v;
+        }
+    } else {
+        const __m256i sh = _mm256_set1_epi32(headroom_downshift);
+        for (; i + 16 <= n; i += 16) {
+            __m256 lo_f = _mm256_mul_ps(_mm256_loadu_ps(fsrc + i), boost);
+            __m256 hi_f = _mm256_mul_ps(_mm256_loadu_ps(fsrc + i + 8), boost);
+            __m256i lo = _mm256_sra_epi32(_mm256_cvtps_epi32(lo_f),
+                                          _mm256_castsi256_si128(sh));
+            __m256i hi = _mm256_sra_epi32(_mm256_cvtps_epi32(hi_f),
+                                          _mm256_castsi256_si128(sh));
+            __m256i packed = _mm256_packs_epi32(lo, hi);
+            packed = _mm256_permute4x64_epi64(packed, 0xD8);
+            _mm256_storeu_si256((__m256i*)(dst + i), packed);
+        }
+        for (; i < n; ++i) {
+            long v = opj_lrintf(fsrc[i] * boost_s) >> headroom_downshift;
+            if (v > INT16_MAX) {
+                v = INT16_MAX;
+            } else if (v < INT16_MIN) {
+                v = INT16_MIN;
+            }
+            dst[i] = (int16_t)v;
+        }
+    }
+}
+
+/* SP-3.5: int16 -> int32 with left-shift reversal of headroom_downshift.
+ * Kept for symmetry with the pack helper; the standard final-resolution
+ * path emits via float widening instead.  Unused at Task 1a's gate but
+ * compiled in so the plumbing exists for future MCT extension. */
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((unused))
+#endif
+static void opj_dwt_unpack_int16_q15_to_int32(OPJ_INT32* OPJ_RESTRICT dst,
+        const int16_t* OPJ_RESTRICT src,
+        OPJ_SIZE_T n,
+        int headroom_downshift)
+{
+    OPJ_SIZE_T i = 0;
+    for (; i + 16 <= n; i += 16) {
+        __m256i packed = _mm256_loadu_si256((const __m256i*)(src + i));
+        __m256i lo = _mm256_cvtepi16_epi32(_mm256_castsi256_si128(packed));
+        __m256i hi = _mm256_cvtepi16_epi32(
+                         _mm256_extracti128_si256(packed, 1));
+        if (headroom_downshift != 0) {
+            const __m128i sh = _mm_cvtsi32_si128(headroom_downshift);
+            lo = _mm256_sll_epi32(lo, sh);
+            hi = _mm256_sll_epi32(hi, sh);
+        }
+        _mm256_storeu_si256((__m256i*)(dst + i), lo);
+        _mm256_storeu_si256((__m256i*)(dst + i + 8), hi);
+    }
+    for (; i < n; ++i) {
+        dst[i] = ((OPJ_INT32)src[i]) << headroom_downshift;
+    }
+}
+
+/* SP-3.5: scalar inverse 9/7 lift on one int16 row of length rw.
+ *
+ * Layout convention: after interleave, scratch[0..rw-1] is the
+ * interleaved subband row with low-band samples at positions matching
+ * cas (cas==0: even positions hold low band, scaled by K; odd positions
+ * hold high band, scaled by 2/K).  The lift below acts on physical
+ * positions in scratch and is independent of cas (only the K/2/K
+ * assignment in the interleave depends on cas).
+ *
+ * Edge handling: symmetric mirror — for index -1 use scratch[1];
+ * for index rw use scratch[rw-2]. */
+static INLINE void opj_v16dwt_decode_step_h_int16_scalar_tail(int16_t* s,
+        OPJ_UINT32 i_start,
+        OPJ_UINT32 i_end,
+        OPJ_UINT32 rw,
+        int code)
+{
+    /* code: 1=delta(even), 2=beta(even), 3=gamma(odd), 4=alpha(odd). */
+    const int want_even = (code == 1) || (code == 2);
+    OPJ_UINT32 i;
+    for (i = i_start; i < i_end; ++i) {
+        OPJ_INT32 prev;
+        OPJ_INT32 nextv;
+        OPJ_INT32 sum, frac;
+        if (((i & 1U) == 0U) != want_even) {
+            continue;
+        }
+        prev  = (i == 0) ? s[1] : s[i - 1];
+        nextv = (i + 1 >= rw) ? s[i - 1] : s[i + 1];
+        if (code == 1) {
+            sum = prev + nextv;
+            frac = (sum * (OPJ_INT32)Q15_DELTA + 0x4000) >> 15;
+            s[i] = (int16_t)(s[i] - frac);
+        } else if (code == 2) {
+            OPJ_INT32 a = (prev  * (OPJ_INT32)Q15_BETA8 + 0x4000) >> 15;
+            OPJ_INT32 b = (nextv * (OPJ_INT32)Q15_BETA8 + 0x4000) >> 15;
+            OPJ_INT32 prod = (a + b + 4) >> 3;
+            s[i] = (int16_t)(s[i] + prod);
+        } else if (code == 3) {
+            sum = prev + nextv;
+            frac = (sum * (OPJ_INT32)Q15_GAMMA + 0x4000) >> 15;
+            s[i] = (int16_t)(s[i] - frac);
+        } else {
+            sum = prev + nextv;
+            frac = (sum * (OPJ_INT32)Q15_ALPHA_F + 0x4000) >> 15;
+            s[i] = (int16_t)(s[i] + sum + frac);
+        }
+    }
+}
+
+/* SP-3.5: horizontal int16 9/7 lift kernel.  Operates in place on a
+ * scratch row of length rw.  Step ordering follows §3 of the cleanroom
+ * doc: delta (S), gamma (D), beta x8 (S), alpha additive (D).
+ *
+ * The interior is processed in 16-sample chunks; the first and last
+ * chunks use scalar fixup so the symmetric-mirror edge handling stays
+ * clear.  When rw < 32 the row is processed entirely in scalar. */
+static void opj_v16dwt_decode_step_h_int16_avx2(int16_t* OPJ_RESTRICT scratch,
+        OPJ_UINT32 rw)
+{
+    const __m256i zero = _mm256_setzero_si256();
+    const __m256i v_delta   = _mm256_set1_epi16((short)Q15_DELTA);
+    const __m256i v_gamma   = _mm256_set1_epi16((short)Q15_GAMMA);
+    const __m256i v_beta8   = _mm256_set1_epi16((short)Q15_BETA8);
+    const __m256i v_alpha_f = _mm256_set1_epi16((short)Q15_ALPHA_F);
+    const __m256i v_four    = _mm256_set1_epi16((short)4);
+    int pass;
+
+    /* Each of the four passes scans i = 0..rw-1 and updates only one
+     * parity.  pass meanings: 1=delta(even), 3=gamma(odd), 2=beta(even),
+     * 4=alpha(odd).  We dispatch in standard inverse-9/7 lift order:
+     * delta, gamma, beta, alpha. */
+    static const int pass_codes[4] = { 1, 3, 2, 4 };
+
+    for (pass = 0; pass < 4; ++pass) {
+        const int code = pass_codes[pass];
+        OPJ_UINT32 i;
+
+        if (rw < 18U) {
+            /* Pure scalar.  Need rw-2 interior, two edges.  Bypass SIMD. */
+            opj_v16dwt_decode_step_h_int16_scalar_tail(scratch, 0U, rw,
+                    rw, code);
+            continue;
+        }
+
+        /* Scalar fixup for the leading edge (i = 0..15). */
+        opj_v16dwt_decode_step_h_int16_scalar_tail(scratch, 0U, 16U,
+                rw, code);
+
+        /* AVX2 interior, i = 16 .. rw-16, processing 16 samples per
+         * iteration.  Loads at i-1 and i+1 are guaranteed in-range
+         * here because i >= 16 and i+16+1 <= rw (last 16 lanes are
+         * left to the trailing scalar pass). */
+        for (i = 16U; i + 16U + 1U <= rw; i += 16U) {
+            __m256i s    = _mm256_loadu_si256((const __m256i*)(scratch + i));
+            __m256i prev = _mm256_loadu_si256((const __m256i*)(scratch + i - 1));
+            __m256i nxt  = _mm256_loadu_si256((const __m256i*)(scratch + i + 1));
+            __m256i sum  = _mm256_add_epi16(prev, nxt);
+            __m256i upd;
+
+            if (code == 1) {
+                __m256i d = MULHRS_Q15(sum, v_delta);
+                __m256i d_keep = _mm256_blend_epi16(d, zero, 0xAA);
+                upd = _mm256_sub_epi16(s, d_keep);
+            } else if (code == 3) {
+                __m256i d = MULHRS_Q15(sum, v_gamma);
+                __m256i d_keep = _mm256_blend_epi16(zero, d, 0xAA);
+                upd = _mm256_sub_epi16(s, d_keep);
+            } else if (code == 2) {
+                __m256i a = MULHRS_Q15(prev, v_beta8);
+                __m256i b = MULHRS_Q15(nxt,  v_beta8);
+                __m256i p = _mm256_add_epi16(_mm256_add_epi16(a, b), v_four);
+                __m256i boost = _mm256_srai_epi16(p, 3);
+                __m256i b_keep = _mm256_blend_epi16(boost, zero, 0xAA);
+                upd = _mm256_add_epi16(s, b_keep);
+            } else {
+                __m256i frac = MULHRS_Q15(sum, v_alpha_f);
+                __m256i contrib = _mm256_add_epi16(sum, frac);
+                __m256i c_keep = _mm256_blend_epi16(zero, contrib, 0xAA);
+                upd = _mm256_add_epi16(s, c_keep);
+            }
+            _mm256_storeu_si256((__m256i*)(scratch + i), upd);
+        }
+
+        /* Scalar fixup for the trailing edge.  Range is from the last
+         * SIMD store (i) up to rw. */
+        opj_v16dwt_decode_step_h_int16_scalar_tail(scratch, i, rw,
+                rw, code);
+    }
+}
+
+/* SP-3.5: interleave one horizontal row.
+ *
+ * Reads a contiguous tile-row of width rw split into low band (sn
+ * samples) and high band (dn samples), and writes them into scratch[]
+ * with K applied to even-output-index samples and 2/K to odd-output-index
+ * samples.  cas selects which band lands at even positions. */
+static void opj_v16dwt_interleave_h_int16(int16_t* OPJ_RESTRICT scratch,
+        const int16_t* OPJ_RESTRICT row,
+        OPJ_INT32 sn,
+        OPJ_INT32 dn,
+        OPJ_INT32 cas)
+{
+    OPJ_INT32 i;
+    const int16_t* low  = row;
+    const int16_t* high = row + sn;
+    /* Output even index gets low (cas=0) or high (cas=1).  K is for the
+     * low band; 2/K is for the high band — applied per band regardless
+     * of which scratch parity they land in. */
+    if (cas == 0) {
+        for (i = 0; i < sn; ++i) {
+            OPJ_INT32 v = low[i];
+            OPJ_INT32 mul = (v * (OPJ_INT32)Q15_K_F + 0x4000) >> 15;
+            scratch[2 * i] = (int16_t)(v + mul);
+        }
+        for (i = 0; i < dn; ++i) {
+            OPJ_INT32 v = high[i];
+            OPJ_INT32 mul = (v * (OPJ_INT32)Q15_INVK_F + 0x4000) >> 15;
+            scratch[2 * i + 1] = (int16_t)(v + mul);
+        }
+    } else {
+        for (i = 0; i < sn; ++i) {
+            OPJ_INT32 v = low[i];
+            OPJ_INT32 mul = (v * (OPJ_INT32)Q15_K_F + 0x4000) >> 15;
+            scratch[2 * i + 1] = (int16_t)(v + mul);
+        }
+        for (i = 0; i < dn; ++i) {
+            OPJ_INT32 v = high[i];
+            OPJ_INT32 mul = (v * (OPJ_INT32)Q15_INVK_F + 0x4000) >> 15;
+            scratch[2 * i] = (int16_t)(v + mul);
+        }
+    }
+}
+
+/* SP-3.5: process one horizontal row through interleave + lift + scatter
+ * back into the row. */
+static void opj_dwt97_decode_h_one_row_int16(int16_t* OPJ_RESTRICT row,
+        int16_t* OPJ_RESTRICT scratch,
+        OPJ_INT32 sn,
+        OPJ_INT32 dn,
+        OPJ_INT32 cas)
+{
+    OPJ_INT32 rw = sn + dn;
+    OPJ_INT32 i;
+
+    if (rw <= 0) {
+        return;
+    }
+    if (rw == 1) {
+        /* Single sample: apply K or 2/K only — no lift. */
+        OPJ_INT32 v = (cas == 0) ? row[0] : row[0];
+        OPJ_INT32 mul;
+        if (sn == 1) {
+            mul = (v * (OPJ_INT32)Q15_K_F + 0x4000) >> 15;
+        } else {
+            mul = (v * (OPJ_INT32)Q15_INVK_F + 0x4000) >> 15;
+        }
+        row[0] = (int16_t)(v + mul);
+        return;
+    }
+    opj_v16dwt_interleave_h_int16(scratch, row, sn, dn, cas);
+    opj_v16dwt_decode_step_h_int16_avx2(scratch, (OPJ_UINT32)rw);
+    for (i = 0; i < rw; ++i) {
+        row[i] = scratch[i];
+    }
+}
+
+/* SP-3.5: scalar inverse 9/7 lift on one column-strip of int16 data.
+ *
+ * Task 1a placeholder.  Operates on stripe of `lanes` columns and
+ * `rh` rows.  Implements the same algorithm as the horizontal kernel
+ * with the same edge handling, but column-strided.  Task 1b replaces
+ * this with an AVX2 vectorized implementation. */
+static void opj_dwt97_decode_v_one_strip_int16_scalar(int16_t* OPJ_RESTRICT col0,
+        int16_t* OPJ_RESTRICT scratch,
+        OPJ_INT32 sn,
+        OPJ_INT32 dn,
+        OPJ_INT32 cas,
+        OPJ_UINT32 lanes,
+        OPJ_SIZE_T row_stride)
+{
+    OPJ_INT32 rh = sn + dn;
+    OPJ_UINT32 lane;
+    OPJ_INT32 i;
+
+    if (rh <= 0) {
+        return;
+    }
+    for (lane = 0; lane < lanes; ++lane) {
+        int16_t* col = col0 + lane;
+        if (rh == 1) {
+            OPJ_INT32 v = col[0];
+            OPJ_INT32 mul = (sn == 1) ?
+                            ((v * (OPJ_INT32)Q15_K_F   + 0x4000) >> 15) :
+                            ((v * (OPJ_INT32)Q15_INVK_F + 0x4000) >> 15);
+            col[0] = (int16_t)(v + mul);
+            continue;
+        }
+        /* Interleave column into scratch with K/2K applied. */
+        if (cas == 0) {
+            for (i = 0; i < sn; ++i) {
+                OPJ_INT32 v = col[(OPJ_SIZE_T)i * row_stride];
+                OPJ_INT32 mul = (v * (OPJ_INT32)Q15_K_F + 0x4000) >> 15;
+                scratch[2 * i] = (int16_t)(v + mul);
+            }
+            for (i = 0; i < dn; ++i) {
+                OPJ_INT32 v = col[(OPJ_SIZE_T)(sn + i) * row_stride];
+                OPJ_INT32 mul = (v * (OPJ_INT32)Q15_INVK_F + 0x4000) >> 15;
+                scratch[2 * i + 1] = (int16_t)(v + mul);
+            }
+        } else {
+            for (i = 0; i < sn; ++i) {
+                OPJ_INT32 v = col[(OPJ_SIZE_T)i * row_stride];
+                OPJ_INT32 mul = (v * (OPJ_INT32)Q15_K_F + 0x4000) >> 15;
+                scratch[2 * i + 1] = (int16_t)(v + mul);
+            }
+            for (i = 0; i < dn; ++i) {
+                OPJ_INT32 v = col[(OPJ_SIZE_T)(sn + i) * row_stride];
+                OPJ_INT32 mul = (v * (OPJ_INT32)Q15_INVK_F + 0x4000) >> 15;
+                scratch[2 * i] = (int16_t)(v + mul);
+            }
+        }
+        /* In-place scalar lift. */
+        opj_v16dwt_decode_step_h_int16_scalar_tail(scratch, 0U,
+                (OPJ_UINT32)rh, (OPJ_UINT32)rh, 1);
+        opj_v16dwt_decode_step_h_int16_scalar_tail(scratch, 0U,
+                (OPJ_UINT32)rh, (OPJ_UINT32)rh, 3);
+        opj_v16dwt_decode_step_h_int16_scalar_tail(scratch, 0U,
+                (OPJ_UINT32)rh, (OPJ_UINT32)rh, 2);
+        opj_v16dwt_decode_step_h_int16_scalar_tail(scratch, 0U,
+                (OPJ_UINT32)rh, (OPJ_UINT32)rh, 4);
+        /* Scatter back. */
+        for (i = 0; i < rh; ++i) {
+            col[(OPJ_SIZE_T)i * row_stride] = scratch[i];
+        }
+    }
+}
+
+typedef struct {
+    int16_t* OPJ_RESTRICT tiledp;
+    OPJ_UINT32 w;
+    OPJ_UINT32 min_j;
+    OPJ_UINT32 max_j;
+    OPJ_INT32 sn;
+    OPJ_INT32 dn;
+    OPJ_INT32 cas;
+    OPJ_UINT32 rw;
+    int16_t* scratch;
+} opj_dwt97_decode_h_job_int16_t;
+
+static void opj_dwt97_decode_h_func_int16(void* user_data, opj_tls_t* tls)
+{
+    opj_dwt97_decode_h_job_int16_t* job =
+        (opj_dwt97_decode_h_job_int16_t*)user_data;
+    OPJ_UINT32 j;
+    (void)tls;
+    for (j = job->min_j; j < job->max_j; ++j) {
+        int16_t* row = &job->tiledp[(OPJ_SIZE_T)j * job->w];
+        opj_dwt97_decode_h_one_row_int16(row, job->scratch,
+                                         job->sn, job->dn, job->cas);
+    }
+    opj_aligned_free(job->scratch);
+    opj_free(job);
+}
+
+typedef struct {
+    int16_t* OPJ_RESTRICT tiledp;
+    OPJ_UINT32 w;
+    OPJ_UINT32 min_j;
+    OPJ_UINT32 max_j;
+    OPJ_INT32 sn;
+    OPJ_INT32 dn;
+    OPJ_INT32 cas;
+    OPJ_UINT32 rh;
+    int16_t* scratch;
+} opj_dwt97_decode_v_job_int16_t;
+
+static void opj_dwt97_decode_v_func_int16(void* user_data, opj_tls_t* tls)
+{
+    opj_dwt97_decode_v_job_int16_t* job =
+        (opj_dwt97_decode_v_job_int16_t*)user_data;
+    (void)tls;
+    if (job->max_j > job->min_j) {
+        opj_dwt97_decode_v_one_strip_int16_scalar(
+            &job->tiledp[job->min_j], job->scratch,
+            job->sn, job->dn, job->cas,
+            job->max_j - job->min_j, (OPJ_SIZE_T)job->w);
+    }
+    opj_aligned_free(job->scratch);
+    opj_free(job);
+}
+
+/* SP-3.5: orchestrator for the int16 Q1.15 9/7 IDWT.  Mirrors
+ * opj_dwt_decode_tile_97 (the float orchestrator) but operates on an
+ * int16 scratch buffer holding the packed view of tilec->data for the
+ * duration of the IDWT.  At Task 1a's gate (prec <= 12 unsigned),
+ * headroom_downshift = 0, so the pack and final emit do not shift. */
+static OPJ_BOOL opj_dwt_decode_tile_97_int16(opj_thread_pool_t* tp,
+        opj_tcd_tilecomp_t* tilec,
+        OPJ_UINT32 numres,
+        OPJ_UINT32 prec)
+{
+    opj_tcd_resolution_t* tr = tilec->resolutions;
+
+    OPJ_UINT32 rw = (OPJ_UINT32)(tr->x1 - tr->x0);
+    OPJ_UINT32 rh = (OPJ_UINT32)(tr->y1 - tr->y0);
+
+    OPJ_UINT32 w = (OPJ_UINT32)(tilec->resolutions[
+            tilec->minimum_num_resolutions - 1].x1 -
+            tilec->resolutions[tilec->minimum_num_resolutions - 1].x0);
+    OPJ_UINT32 full_h = (OPJ_UINT32)(tilec->resolutions[
+            tilec->minimum_num_resolutions - 1].y1 -
+            tilec->resolutions[tilec->minimum_num_resolutions - 1].y0);
+    OPJ_SIZE_T tilec_area = (OPJ_SIZE_T)w * full_h;
+    OPJ_SIZE_T h_mem_size;
+    int num_threads;
+    /* Q-format precision boost: pack does float * 2^boost before lrintf,
+     * emit divides by 2^boost.  Each bit gives ~3 dB PSNR (variance-based
+     * MSE).  The headroom_downshift is applied as an int >> after cvtps
+     * to keep the int16 in range when boost+input would otherwise overflow;
+     * downshift costs ~1 bit of precision per shift step.  Empirically tuned
+     * to clear 60 dB at prec <= 8 lossy; see cleanroom §7.5 + §4. */
+    const int precision_boost =
+        (prec <= 8)  ? 6 :
+        (prec <= 10) ? 4 : 2;
+    const int headroom_downshift = 0;
+
+    int16_t* scratch_data = NULL;
+
+    if (numres == 1U || w == 0U) {
+        return OPJ_TRUE;
+    }
+    num_threads = opj_thread_pool_get_thread_count(tp);
+    h_mem_size = opj_dwt_max_resolution(tr, numres);
+    /* Per-row scratch needs to hold one row of length up to the max
+     * resolution dimension. */
+    if (h_mem_size > (SIZE_MAX / sizeof(int16_t))) {
+        return OPJ_FALSE;
+    }
+    h_mem_size *= sizeof(int16_t);
+
+    scratch_data = (int16_t*)opj_aligned_32_malloc(
+                       tilec_area * sizeof(int16_t));
+    if (!scratch_data) {
+        return OPJ_FALSE;
+    }
+
+    /* Pack float-domain tilec->data into int16 scratch.  Pack reads
+     * tilec->data as float32 (it is OPJ_INT32 storage holding
+     * reinterpreted float bits from T1 + dequant). */
+    opj_dwt_pack_int32_to_int16_q15(scratch_data, tilec->data, tilec_area,
+                                    precision_boost, headroom_downshift);
+
+    while (--numres) {
+        int16_t* OPJ_RESTRICT tiledp = scratch_data;
+        OPJ_INT32 h_sn, h_dn, h_cas;
+        OPJ_INT32 v_sn, v_dn, v_cas;
+        OPJ_UINT32 j;
+
+        ++tr;
+        h_sn = (OPJ_INT32)rw;
+        v_sn = (OPJ_INT32)rh;
+
+        rw = (OPJ_UINT32)(tr->x1 - tr->x0);
+        rh = (OPJ_UINT32)(tr->y1 - tr->y0);
+
+        h_dn = (OPJ_INT32)rw - h_sn;
+        h_cas = tr->x0 % 2;
+
+        if (num_threads <= 1 || rh <= 1) {
+            int16_t* row_scratch = (int16_t*)opj_aligned_32_malloc(h_mem_size);
+            if (!row_scratch) {
+                opj_aligned_free(scratch_data);
+                return OPJ_FALSE;
+            }
+            for (j = 0; j < rh; ++j) {
+                opj_dwt97_decode_h_one_row_int16(
+                    &tiledp[(OPJ_SIZE_T)j * w], row_scratch,
+                    h_sn, h_dn, h_cas);
+            }
+            opj_aligned_free(row_scratch);
+        } else {
+            OPJ_UINT32 num_jobs = (OPJ_UINT32)num_threads;
+            OPJ_UINT32 step_j;
+            if (rh < num_jobs) {
+                num_jobs = rh;
+            }
+            step_j = rh / num_jobs;
+            for (j = 0; j < num_jobs; ++j) {
+                opj_dwt97_decode_h_job_int16_t* job =
+                    (opj_dwt97_decode_h_job_int16_t*)opj_malloc(
+                        sizeof(opj_dwt97_decode_h_job_int16_t));
+                if (!job) {
+                    opj_thread_pool_wait_completion(tp, 0);
+                    opj_aligned_free(scratch_data);
+                    return OPJ_FALSE;
+                }
+                job->tiledp = tiledp;
+                job->w = w;
+                job->min_j = j * step_j;
+                job->max_j = (j + 1U == num_jobs) ? rh : (j + 1U) * step_j;
+                job->sn = h_sn;
+                job->dn = h_dn;
+                job->cas = h_cas;
+                job->rw = rw;
+                job->scratch = (int16_t*)opj_aligned_32_malloc(h_mem_size);
+                if (!job->scratch) {
+                    opj_thread_pool_wait_completion(tp, 0);
+                    opj_free(job);
+                    opj_aligned_free(scratch_data);
+                    return OPJ_FALSE;
+                }
+                opj_thread_pool_submit_job(tp, opj_dwt97_decode_h_func_int16,
+                                           job);
+            }
+            opj_thread_pool_wait_completion(tp, 0);
+        }
+
+        v_dn = (OPJ_INT32)rh - v_sn;
+        v_cas = tr->y0 % 2;
+
+        if (num_threads <= 1 || rw <= 1) {
+            int16_t* col_scratch = (int16_t*)opj_aligned_32_malloc(h_mem_size);
+            if (!col_scratch) {
+                opj_aligned_free(scratch_data);
+                return OPJ_FALSE;
+            }
+            opj_dwt97_decode_v_one_strip_int16_scalar(
+                tiledp, col_scratch, v_sn, v_dn, v_cas, rw, (OPJ_SIZE_T)w);
+            opj_aligned_free(col_scratch);
+        } else {
+            OPJ_UINT32 num_jobs = (OPJ_UINT32)num_threads;
+            OPJ_UINT32 step_j;
+            if (rw < num_jobs) {
+                num_jobs = rw;
+            }
+            step_j = rw / num_jobs;
+            for (j = 0; j < num_jobs; ++j) {
+                opj_dwt97_decode_v_job_int16_t* job =
+                    (opj_dwt97_decode_v_job_int16_t*)opj_malloc(
+                        sizeof(opj_dwt97_decode_v_job_int16_t));
+                if (!job) {
+                    opj_thread_pool_wait_completion(tp, 0);
+                    opj_aligned_free(scratch_data);
+                    return OPJ_FALSE;
+                }
+                job->tiledp = tiledp;
+                job->w = w;
+                job->min_j = j * step_j;
+                job->max_j = (j + 1U == num_jobs) ? rw : (j + 1U) * step_j;
+                job->sn = v_sn;
+                job->dn = v_dn;
+                job->cas = v_cas;
+                job->rh = rh;
+                job->scratch = (int16_t*)opj_aligned_32_malloc(h_mem_size);
+                if (!job->scratch) {
+                    opj_thread_pool_wait_completion(tp, 0);
+                    opj_free(job);
+                    opj_aligned_free(scratch_data);
+                    return OPJ_FALSE;
+                }
+                opj_thread_pool_submit_job(tp, opj_dwt97_decode_v_func_int16,
+                                           job);
+            }
+            opj_thread_pool_wait_completion(tp, 0);
+        }
+    }
+
+    /* Final emit: int16 scratch -> float32 bits in tilec->data.
+     *
+     * The downstream DC-shift + clamp step (opj_tcd_dc_level_shift_decode)
+     * for qmfbid==0 reads tilec->data as float32, calls lrintf, adds
+     * m_dc_level_shift, and clamps.  We therefore widen our int16 IDWT
+     * result back to float32 (applying headroom upshift first) and
+     * store the float bits into tilec->data so the existing post-DWT
+     * pipeline continues unchanged. */
+    {
+        OPJ_SIZE_T i;
+        float* OPJ_RESTRICT fdst = (float*)tilec->data;
+        const float emit_scale = 1.0f / (float)(1 << precision_boost);
+        for (i = 0; i < tilec_area; ++i) {
+            OPJ_INT32 v = ((OPJ_INT32)scratch_data[i]) << headroom_downshift;
+            fdst[i] = (float)v * emit_scale;
+        }
+    }
+
+    opj_aligned_free(scratch_data);
+    return OPJ_TRUE;
+}
+
 #endif /* __AVX2__ */
 
 /* <summary>                            */
@@ -5126,11 +5787,39 @@ OPJ_BOOL opj_dwt_decode_partial_97(opj_tcd_tilecomp_t* OPJ_RESTRICT tilec,
 }
 
 
+/* SP-3.5: env-var opt-in.  The int16 9/7 path achieves ~50 dB PSNR vs the
+ * float reference (irreducible float->int16 conversion floor; see spec
+ * § PSNR floor and the SP-3.5b future track).  Conformance MD5s diverge
+ * from upstream openjpeg for files that hit the path.  Default off so the
+ * stock conformance fingerprint is preserved; opt in for perf wins or
+ * benchmarks.  Cached after first read. */
+static int opj_dwt_int16_97_enabled(void)
+{
+    static int cached = -1;
+    if (cached < 0) {
+        const char* s = getenv("OPJ_DWT_INT16_97");
+        cached = (s && s[0] == '1' && s[1] == '\0') ? 1 : 0;
+    }
+    return cached;
+}
+
 OPJ_BOOL opj_dwt_decode_real(opj_tcd_t *p_tcd,
                              opj_tcd_tilecomp_t* OPJ_RESTRICT tilec,
                              OPJ_UINT32 numres)
 {
     if (p_tcd->whole_tile_decoding) {
+#ifdef __AVX2__
+        if (!opj_dwt_force_float_97 && opj_dwt_int16_97_enabled()) {
+            const OPJ_UINT32 compno = (OPJ_UINT32)(tilec -
+                                       p_tcd->tcd_image->tiles->comps);
+            const opj_image_comp_t *image_comp = &p_tcd->image->comps[compno];
+            if (image_comp->prec <= 12 && !image_comp->sgnd) {
+                return opj_dwt_decode_tile_97_int16(p_tcd->thread_pool,
+                                                    tilec, numres,
+                                                    image_comp->prec);
+            }
+        }
+#endif
         return opj_dwt_decode_tile_97(p_tcd->thread_pool, tilec, numres);
     } else {
         return opj_dwt_decode_partial_97(tilec, numres);

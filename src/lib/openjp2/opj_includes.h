@@ -243,6 +243,8 @@ typedef unsigned int OPJ_BITFIELD;
 #include "tcd.h"
 #include "t1.h"
 #include "dwt.h"
+/* SP-3.5 test override: force the float 9/7 IDWT path when nonzero. */
+extern int opj_dwt_force_float_97;
 #include "t2.h"
 #include "mct.h"
 #include "opj_intmath.h"
