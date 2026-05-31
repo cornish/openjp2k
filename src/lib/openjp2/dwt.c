@@ -3692,16 +3692,174 @@ typedef struct {
     int16_t* scratch;
 } opj_dwt97_decode_v_job_int16_t;
 
+/* SP-3.5 Task 1b: vectorized vertical 9/7 lift.  Processes a strip of
+ * PARALLEL_COLS_53_S16 (32) adjacent columns at once.  The strip buffer
+ * `tmp` holds the interleaved (K/2K-scaled) samples in spatial row order,
+ * stride PARALLEL_COLS_53_S16; each strip row is 32 columns = 2 __m256i.
+ *
+ * Unlike the horizontal kernel, lift neighbours are whole adjacent rows
+ * (separate vectors at row stride), so there is no intra-vector parity
+ * blend — every one of the 32 lanes is a distinct column getting the same
+ * treatment.  Step order matches the scalar/​horizontal kernels:
+ * delta (even), gamma (odd), beta×8 (even), alpha additive (odd). */
+static void opj_v16dwt_decode_step_v_int16_avx2(int16_t* OPJ_RESTRICT tmp,
+        OPJ_UINT32 rh)
+{
+    const __m256i v_delta   = _mm256_set1_epi16((short)Q15_DELTA);
+    const __m256i v_gamma   = _mm256_set1_epi16((short)Q15_GAMMA);
+    const __m256i v_beta8   = _mm256_set1_epi16((short)Q15_BETA8);
+    const __m256i v_alpha_f = _mm256_set1_epi16((short)Q15_ALPHA_F);
+    const __m256i v_four    = _mm256_set1_epi16((short)4);
+    static const int pass_codes[4] = { 1, 3, 2, 4 };
+    const OPJ_UINT32 S = (OPJ_UINT32)PARALLEL_COLS_53_S16; /* 32 */
+    int pass;
+
+    /* rh < 2 has no even/odd pair to lift; the caller handles it via the
+     * scalar path, so this kernel assumes rh >= 2. */
+    for (pass = 0; pass < 4; ++pass) {
+        const int code = pass_codes[pass];
+        const OPJ_UINT32 want_even = (code == 1 || code == 2) ? 1U : 0U;
+        OPJ_UINT32 i;
+        for (i = 0; i < rh; ++i) {
+            OPJ_UINT32 pi, ni;
+            __m256i s0, s1, p0, p1, n0, n1;
+            if (((i & 1U) == 0U ? 1U : 0U) != want_even) {
+                continue;
+            }
+            pi = (i == 0U) ? 1U : (i - 1U);
+            ni = (i + 1U >= rh) ? (i - 1U) : (i + 1U);
+            s0 = _mm256_load_si256((const __m256i*)(tmp + S * i));
+            s1 = _mm256_load_si256((const __m256i*)(tmp + S * i + 16));
+            p0 = _mm256_load_si256((const __m256i*)(tmp + S * pi));
+            p1 = _mm256_load_si256((const __m256i*)(tmp + S * pi + 16));
+            n0 = _mm256_load_si256((const __m256i*)(tmp + S * ni));
+            n1 = _mm256_load_si256((const __m256i*)(tmp + S * ni + 16));
+            if (code == 1) {
+                s0 = _mm256_sub_epi16(s0, MULHRS_Q15(_mm256_add_epi16(p0, n0), v_delta));
+                s1 = _mm256_sub_epi16(s1, MULHRS_Q15(_mm256_add_epi16(p1, n1), v_delta));
+            } else if (code == 3) {
+                s0 = _mm256_sub_epi16(s0, MULHRS_Q15(_mm256_add_epi16(p0, n0), v_gamma));
+                s1 = _mm256_sub_epi16(s1, MULHRS_Q15(_mm256_add_epi16(p1, n1), v_gamma));
+            } else if (code == 2) {
+                __m256i a0 = MULHRS_Q15(p0, v_beta8);
+                __m256i b0 = MULHRS_Q15(n0, v_beta8);
+                __m256i a1 = MULHRS_Q15(p1, v_beta8);
+                __m256i b1 = MULHRS_Q15(n1, v_beta8);
+                s0 = _mm256_add_epi16(s0, _mm256_srai_epi16(
+                        _mm256_add_epi16(_mm256_add_epi16(a0, b0), v_four), 3));
+                s1 = _mm256_add_epi16(s1, _mm256_srai_epi16(
+                        _mm256_add_epi16(_mm256_add_epi16(a1, b1), v_four), 3));
+            } else {
+                __m256i sum0 = _mm256_add_epi16(p0, n0);
+                __m256i sum1 = _mm256_add_epi16(p1, n1);
+                s0 = _mm256_add_epi16(s0,
+                        _mm256_add_epi16(sum0, MULHRS_Q15(sum0, v_alpha_f)));
+                s1 = _mm256_add_epi16(s1,
+                        _mm256_add_epi16(sum1, MULHRS_Q15(sum1, v_alpha_f)));
+            }
+            _mm256_store_si256((__m256i*)(tmp + S * i), s0);
+            _mm256_store_si256((__m256i*)(tmp + S * i + 16), s1);
+        }
+    }
+}
+
+/* SP-3.5 Task 1b: gather 32 adjacent columns of band-separated input
+ * (sn low rows then dn high rows, row stride `stride`) into the spatial
+ * strip `tmp`, applying K to the low band and 2/K to the high band via
+ * additive decomposition.  Mirrors opj_v16dwt_interleave_h_int16. */
+static void opj_v16dwt_interleave_v_int16(int16_t* OPJ_RESTRICT tmp,
+        const int16_t* OPJ_RESTRICT col0,
+        OPJ_INT32 sn,
+        OPJ_INT32 dn,
+        OPJ_INT32 cas,
+        OPJ_SIZE_T stride)
+{
+    const __m256i v_kf  = _mm256_set1_epi16((short)Q15_K_F);
+    const __m256i v_ikf = _mm256_set1_epi16((short)Q15_INVK_F);
+    const int16_t* low  = col0;
+    const int16_t* high = col0 + (OPJ_SIZE_T)sn * stride;
+    const OPJ_UINT32 S = (OPJ_UINT32)PARALLEL_COLS_53_S16;
+    /* cas==0: low lands on even rows, high on odd; cas==1: swapped. */
+    const OPJ_UINT32 low_off  = (cas == 0) ? 0U : 1U;
+    const OPJ_UINT32 high_off = (cas == 0) ? 1U : 0U;
+    OPJ_INT32 i;
+    for (i = 0; i < sn; ++i) {
+        __m256i v0 = _mm256_loadu_si256((const __m256i*)(low + (OPJ_SIZE_T)i * stride));
+        __m256i v1 = _mm256_loadu_si256((const __m256i*)(low + (OPJ_SIZE_T)i * stride + 16));
+        v0 = _mm256_add_epi16(v0, MULHRS_Q15(v0, v_kf));
+        v1 = _mm256_add_epi16(v1, MULHRS_Q15(v1, v_kf));
+        _mm256_store_si256((__m256i*)(tmp + S * (2U * (OPJ_UINT32)i + low_off)), v0);
+        _mm256_store_si256((__m256i*)(tmp + S * (2U * (OPJ_UINT32)i + low_off) + 16), v1);
+    }
+    for (i = 0; i < dn; ++i) {
+        __m256i v0 = _mm256_loadu_si256((const __m256i*)(high + (OPJ_SIZE_T)i * stride));
+        __m256i v1 = _mm256_loadu_si256((const __m256i*)(high + (OPJ_SIZE_T)i * stride + 16));
+        v0 = _mm256_add_epi16(v0, MULHRS_Q15(v0, v_ikf));
+        v1 = _mm256_add_epi16(v1, MULHRS_Q15(v1, v_ikf));
+        _mm256_store_si256((__m256i*)(tmp + S * (2U * (OPJ_UINT32)i + high_off)), v0);
+        _mm256_store_si256((__m256i*)(tmp + S * (2U * (OPJ_UINT32)i + high_off) + 16), v1);
+    }
+}
+
+/* SP-3.5 Task 1b: one 32-column strip, AVX2.  Interleave + lift + scatter,
+ * column-strided back into col0.  Requires rh >= 2 (caller guarantees). */
+static void opj_dwt97_decode_v_one_strip_int16_avx2(int16_t* OPJ_RESTRICT col0,
+        int16_t* OPJ_RESTRICT tmp,
+        OPJ_INT32 sn,
+        OPJ_INT32 dn,
+        OPJ_INT32 cas,
+        OPJ_SIZE_T stride)
+{
+    const OPJ_UINT32 rh = (OPJ_UINT32)(sn + dn);
+    const OPJ_UINT32 S = (OPJ_UINT32)PARALLEL_COLS_53_S16;
+    OPJ_UINT32 r;
+    opj_v16dwt_interleave_v_int16(tmp, col0, sn, dn, cas, stride);
+    opj_v16dwt_decode_step_v_int16_avx2(tmp, rh);
+    for (r = 0; r < rh; ++r) {
+        __m256i v0 = _mm256_load_si256((const __m256i*)(tmp + S * r));
+        __m256i v1 = _mm256_load_si256((const __m256i*)(tmp + S * r + 16));
+        _mm256_storeu_si256((__m256i*)(col0 + (OPJ_SIZE_T)r * stride), v0);
+        _mm256_storeu_si256((__m256i*)(col0 + (OPJ_SIZE_T)r * stride + 16), v1);
+    }
+}
+
+/* SP-3.5 Task 1b: vertical pass over a range of `cols` columns starting at
+ * `base`.  Full 32-column strips go through the AVX2 path; the remainder
+ * (and the rh < 2 degenerate case) falls back to the scalar strip.  `tmp`
+ * must hold PARALLEL_COLS_53_S16 * rh int16 (the scalar path uses only the
+ * first rh entries). */
+static void opj_dwt97_decode_v_range_int16(int16_t* OPJ_RESTRICT base,
+        OPJ_UINT32 cols,
+        int16_t* OPJ_RESTRICT tmp,
+        OPJ_INT32 sn,
+        OPJ_INT32 dn,
+        OPJ_INT32 cas,
+        OPJ_SIZE_T stride)
+{
+    const OPJ_UINT32 STRIPE = (OPJ_UINT32)PARALLEL_COLS_53_S16; /* 32 */
+    const OPJ_INT32 rh = sn + dn;
+    OPJ_UINT32 c = 0;
+    if (rh >= 2) {
+        for (; c + STRIPE <= cols; c += STRIPE) {
+            opj_dwt97_decode_v_one_strip_int16_avx2(base + c, tmp,
+                    sn, dn, cas, stride);
+        }
+    }
+    if (c < cols) {
+        opj_dwt97_decode_v_one_strip_int16_scalar(base + c, tmp,
+                sn, dn, cas, cols - c, stride);
+    }
+}
+
 static void opj_dwt97_decode_v_func_int16(void* user_data, opj_tls_t* tls)
 {
     opj_dwt97_decode_v_job_int16_t* job =
         (opj_dwt97_decode_v_job_int16_t*)user_data;
     (void)tls;
     if (job->max_j > job->min_j) {
-        opj_dwt97_decode_v_one_strip_int16_scalar(
-            &job->tiledp[job->min_j], job->scratch,
-            job->sn, job->dn, job->cas,
-            job->max_j - job->min_j, (OPJ_SIZE_T)job->w);
+        opj_dwt97_decode_v_range_int16(
+            &job->tiledp[job->min_j], job->max_j - job->min_j, job->scratch,
+            job->sn, job->dn, job->cas, (OPJ_SIZE_T)job->w);
     }
     opj_aligned_free(job->scratch);
     opj_free(job);
@@ -3772,6 +3930,7 @@ static OPJ_BOOL opj_dwt_decode_tile_97_int16(opj_thread_pool_t* tp,
         int16_t* OPJ_RESTRICT tiledp = scratch_data;
         OPJ_INT32 h_sn, h_dn, h_cas;
         OPJ_INT32 v_sn, v_dn, v_cas;
+        OPJ_SIZE_T v_strip_size;
         OPJ_UINT32 j;
 
         ++tr;
@@ -3836,14 +3995,23 @@ static OPJ_BOOL opj_dwt_decode_tile_97_int16(opj_thread_pool_t* tp,
         v_dn = (OPJ_INT32)rh - v_sn;
         v_cas = tr->y0 % 2;
 
+        /* The vertical strip buffer holds PARALLEL_COLS_53_S16 columns of
+         * rh int16 each (the scalar tail reuses its first rh entries). */
+        if ((OPJ_SIZE_T)rh > (SIZE_MAX / (OPJ_SIZE_T)PARALLEL_COLS_53_S16
+                              / sizeof(int16_t))) {
+            opj_aligned_free(scratch_data);
+            return OPJ_FALSE;
+        }
+        v_strip_size = (OPJ_SIZE_T)PARALLEL_COLS_53_S16 * rh * sizeof(int16_t);
+
         if (num_threads <= 1 || rw <= 1) {
-            int16_t* col_scratch = (int16_t*)opj_aligned_32_malloc(h_mem_size);
+            int16_t* col_scratch = (int16_t*)opj_aligned_32_malloc(v_strip_size);
             if (!col_scratch) {
                 opj_aligned_free(scratch_data);
                 return OPJ_FALSE;
             }
-            opj_dwt97_decode_v_one_strip_int16_scalar(
-                tiledp, col_scratch, v_sn, v_dn, v_cas, rw, (OPJ_SIZE_T)w);
+            opj_dwt97_decode_v_range_int16(
+                tiledp, rw, col_scratch, v_sn, v_dn, v_cas, (OPJ_SIZE_T)w);
             opj_aligned_free(col_scratch);
         } else {
             OPJ_UINT32 num_jobs = (OPJ_UINT32)num_threads;
@@ -3869,7 +4037,7 @@ static OPJ_BOOL opj_dwt_decode_tile_97_int16(opj_thread_pool_t* tp,
                 job->dn = v_dn;
                 job->cas = v_cas;
                 job->rh = rh;
-                job->scratch = (int16_t*)opj_aligned_32_malloc(h_mem_size);
+                job->scratch = (int16_t*)opj_aligned_32_malloc(v_strip_size);
                 if (!job->scratch) {
                     opj_thread_pool_wait_completion(tp, 0);
                     opj_free(job);
