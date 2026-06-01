@@ -5529,7 +5529,7 @@ OPJ_BOOL opj_dwt_decode_tile_97(opj_thread_pool_t* tp,
         /* FIXME event manager error callback */
         return OPJ_FALSE;
     }
-    h.wavelet = (opj_v8_t*) opj_aligned_malloc(l_data_size * sizeof(opj_v8_t));
+    h.wavelet = (opj_v8_t*) opj_aligned_32_malloc(l_data_size * sizeof(opj_v8_t));
     if (!h.wavelet) {
         /* FIXME event manager error callback */
         return OPJ_FALSE;
@@ -5597,7 +5597,7 @@ OPJ_BOOL opj_dwt_decode_tile_97(opj_thread_pool_t* tp,
                     opj_aligned_free(h.wavelet);
                     return OPJ_FALSE;
                 }
-                job->h.wavelet = (opj_v8_t*)opj_aligned_malloc(l_data_size * sizeof(opj_v8_t));
+                job->h.wavelet = (opj_v8_t*)opj_aligned_32_malloc(l_data_size * sizeof(opj_v8_t));
                 if (!job->h.wavelet) {
                     opj_thread_pool_wait_completion(tp, 0);
                     opj_free(job);
@@ -5676,7 +5676,7 @@ OPJ_BOOL opj_dwt_decode_tile_97(opj_thread_pool_t* tp,
                     opj_aligned_free(h.wavelet);
                     return OPJ_FALSE;
                 }
-                job->v.wavelet = (opj_v8_t*)opj_aligned_malloc(l_data_size * sizeof(opj_v8_t));
+                job->v.wavelet = (opj_v8_t*)opj_aligned_32_malloc(l_data_size * sizeof(opj_v8_t));
                 if (!job->v.wavelet) {
                     opj_thread_pool_wait_completion(tp, 0);
                     opj_free(job);
@@ -5781,7 +5781,7 @@ OPJ_BOOL opj_dwt_decode_partial_97(opj_tcd_tilecomp_t* OPJ_RESTRICT tilec,
         opj_sparse_array_int32_free(sa);
         return OPJ_FALSE;
     }
-    h.wavelet = (opj_v8_t*) opj_aligned_malloc(l_data_size * sizeof(opj_v8_t));
+    h.wavelet = (opj_v8_t*) opj_aligned_32_malloc(l_data_size * sizeof(opj_v8_t));
     if (!h.wavelet) {
         /* FIXME event manager error callback */
         opj_sparse_array_int32_free(sa);
