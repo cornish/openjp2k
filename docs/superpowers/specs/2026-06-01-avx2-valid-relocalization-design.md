@@ -94,13 +94,27 @@ mix: 8-bit-lossy-d1, 8-bit-lossy-d8, 12-bit-lossy-d5, 16-bit-lossless-d5, 16-bit
 8-bit-lossless-d1, plus 1–2 fills). The exact file list is fixed in the implementation plan
 from `corpus/synthetic/` and recorded in the findings doc.
 
-**Real-world (deployment reality-check):** three files from `corpus/public/`:
-- a WSI tile — 8-bit RGB lossy
-- a DICOM 16-bit monochrome (lossless if available; else closest)
-- a photographic 8-bit
+**Real-world (deployment reality-check):** drawn from `corpus/public/`, covering the two
+first-class production domains (WSI + radiology) with a clean lossy/lossless balance:
 
-These confirm the synthetic attribution generalizes; divergence between synthetic and
-real-world family mixes is itself a finding.
+- **All WSI tiles** — every file under `corpus/public/wsi-tiles/` (147 tiles across the
+  240² / 256² / 512² / 1024² buckets, all ≤ ~157 KB). Profiled as a **single aggregate
+  `perf` stratum** ("WSI"): one `perf record` over the whole set, self-time summed across all
+  147 decodes. Aggregating is both more representative of the tile pipeline and more
+  statistically robust than any single tile, and the small tile sizes keep one combined run
+  tractable. Coarse `--profile-stages` is likewise run over the full WSI set (openjp2k + grok).
+- **Balanced radiology set (DICOM)** from `corpus/public/medical/`, using the bucket's own
+  compression labels — `J2KI` = irreversible/lossy (9/7), `J2KR` = reversible/lossless (5/3).
+  Pick **matched modalities** (e.g. CT, MR, US, VL, XA, RG) so the lossy and lossless sides
+  cover the same content, spanning bit depths (CT/MR ≈ 12–16-bit, US/VL/XA/RG ≈ 8-bit),
+  **~4–6 files per class**, all **"not huge" — ≤ 1 MB compressed** (excludes the 1.6–15 MB
+  outliers such as `*_VL5_*`, `*_MG1_*`). De-duplicate the bucket's `<name>.j2k` /
+  extensionless `<name>` pairs (same file, two names). Each DICOM file is profiled per-file
+  (they are small). Exact file list pinned in the implementation plan.
+
+These confirm the synthetic attribution generalizes to production content; divergence between
+the synthetic, WSI, and radiology family mixes is itself a finding (e.g. WSI being MCT-heavy
+8-bit RGB vs radiology being single-component high-bit-depth points at different deliverables).
 
 ## Output — the deliverable
 
@@ -151,5 +165,7 @@ A findings document at `openjp2k-bench/docs/findings/2026-06-01-avx2-valid-reloc
   records the exact requirement and a `--profile-stages`-only fallback if `perf` is unavailable
   (coarse-only still distinguishes decode-bound from adapter-bound and gives the grok delta,
   just without intra-decode families).
-- **Single representative file per stratum is noisy.** Mitigated by the stability re-run in
-  success criteria; widen to 2–3 files per stratum if the top families are unstable.
+- **Single representative file per stratum is noisy.** Applies to the **synthetic** strata
+  only (one file per cell); mitigated by the stability re-run in success criteria, widen to
+  2–3 files per cell if the top families are unstable. The WSI stratum (147-tile aggregate)
+  and the DICOM set (~4–6 files per class) are already multi-file and not subject to this.
